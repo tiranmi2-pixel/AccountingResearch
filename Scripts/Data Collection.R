@@ -35,7 +35,8 @@ mf_monthly_df$caldt <- as.Date(mf_monthly_df$caldt)
 
 # Step 2 - Connect share class records to the portfolio level fund identifier.
 map_df <- dbGetQuery(wrds, "
-  SELECT crsp_fundno, crsp_portno, begdt, enddt
+  SELECT crsp_fundno, crsp_portno, begdt, enddt,
+  crsp_cl_grp,retail_fund,inst_fund
   FROM crsp.portnomap
 ")
 map_df$begdt <- as.Date(map_df$begdt)
@@ -66,7 +67,27 @@ mf_with_names <- mf_monthly_df %>%
 dim(mf_monthly_df)
 dim(mf_with_names)
 
-
 mf_with_names <- mf_with_names %>%
-select(crsp_fundno, crsp_portno, fund_name, ticker, caldt, mret, mnav, mtna, everything())
-head(20)
+  select(crsp_fundno, crsp_portno, ticker, fund_name, crsp_cl_grp, retail_fund, inst_fund,
+         caldt, mret, mnav, mtna)
+
+head(mf_with_names, 20)
+
+# Display results of the collected data
+summary_tbl <- mf_with_names %>%
+  mutate(
+    retail_fund = toupper(trimws(retail_fund)),
+    inst_fund   = toupper(trimws(inst_fund))
+  ) %>%
+  summarise(
+    unique_funds_portfolio = n_distinct(crsp_portno),   # "funds" at portfolio level
+    unique_share_classes   = n_distinct(crsp_fundno),   # total share classes
+    
+    retail_share_classes = n_distinct(crsp_fundno[retail_fund == "Y" & inst_fund != "Y"]),
+    inst_share_classes   = n_distinct(crsp_fundno[inst_fund   == "Y" & retail_fund != "Y"]),
+    both_retail_and_inst = n_distinct(crsp_fundno[retail_fund == "Y" & inst_fund == "Y"])
+  )
+
+View(summary_tbl)
+summary_tbl
+
