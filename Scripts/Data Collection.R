@@ -4,7 +4,6 @@
 library(RPostgres)
 library(dplyr)
 library(DBI)
-library(dplyr)
 library(lubridate)
 
 
@@ -36,42 +35,76 @@ mf_monthly_df$caldt <- as.Date(mf_monthly_df$caldt)
 # Step 2 - Connect share class records to the portfolio level fund identifier.
 map_df <- dbGetQuery(wrds, "
   SELECT crsp_fundno, crsp_portno, begdt, enddt,
-  crsp_cl_grp,retail_fund,inst_fund
+         crsp_cl_grp,retail_fund,inst_fund,
+        fund_name,ticker,index_fund_flag,et_flag,vau_fund,dead_flag,
+        cusip8, ncusip, first_offer_dt,
+         mgmt_name, mgmt_cd,
+         mgr_name, mgr_dt,
+         adv_name, open_to_inv,
+         m_fund,
+         end_dt, delist_cd, merge_fundno
+  
   FROM crsp.portnomap
 ")
+
+contact_df <- dbGetQuery(wrds, "
+  SELECT crsp_fundno, chgdt, chgenddt, city, state, website
+  FROM crsp.contact_info
+")
+
+contact_df$chgdt    <- as.Date(contact_df$chgdt)
+contact_df$chgenddt <- as.Date(contact_df$chgenddt)
 map_df$begdt <- as.Date(map_df$begdt)
 map_df$enddt <- as.Date(map_df$enddt)
+map_df$first_offer_dt <- as.Date(map_df$first_offer_dt)
+map_df$mgr_dt <- as.Date(map_df$mgr_dt)
+map_df$end_dt <- as.Date(map_df$end_dt)
 
-# Step 3-  Extracting fund name and ticker for each portoflio number
-fund_names_df <- dbGetQuery(wrds, "
-  SELECT DISTINCT crsp_portno, fund_name, ticker
-  FROM crsp.portnomap
-") %>%
-  distinct(crsp_portno, .keep_all = TRUE)   # ensure one row per portfolio
 
-# Step 4 -  Merge everything together.
+
+# Step 3 -  Merge everything together.
 #   1) joins share-class data to the mapping table
 #   2) keeps only mappings valid in that month (caldt in [begdt, enddt])
 #   3) if multiple mappings match, keeps the most recent one (latest begdt)
 #   4) attaches fund_name and ticker
 mf_with_names <- mf_monthly_df %>%
   left_join(map_df, by = "crsp_fundno") %>%
-  filter(caldt >= begdt & caldt <= enddt) %>%                  # keep only valid mappings
+  # Recommended small robustness tweak: keep rows where enddt is NULL (still active)
+  filter(caldt >= begdt & (is.na(enddt) | caldt <= enddt)) %>%
   group_by(crsp_fundno, caldt) %>%
-  slice_max(begdt, n = 1, with_ties = FALSE) %>%               # prevent duplicate fund-month rows
-  ungroup() %>%
-  select(-begdt, -enddt) %>%
-  left_join(fund_names_df, by = "crsp_portno")
+  slice_max(begdt, n = 1, with_ties = FALSE) %>%
+  ungroup()
 
-# Check results
-dim(mf_monthly_df)
-dim(mf_with_names)
+
+# Step 4 - Attach contact info valid for that month
+mf_with_names <- mf_with_names %>%
+  left_join(contact_df, by = "crsp_fundno") %>%
+  # keep rows with no contact info, or those within valid contact dates
+  filter(is.na(chgdt) | (caldt >= chgdt & (is.na(chgenddt) | caldt <= chgenddt))) %>%
+  group_by(crsp_fundno, caldt) %>%
+  slice_max(chgdt, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+
 
 mf_with_names <- mf_with_names %>%
-  select(crsp_fundno, crsp_portno, ticker, fund_name, crsp_cl_grp, retail_fund, inst_fund,
-         caldt, mret, mnav, mtna)
+  select(
+    crsp_fundno, crsp_portno, ticker, fund_name,
+    city, state, website,                      # you want these early
+    crsp_cl_grp, retail_fund, inst_fund,
+    caldt, mret, mnav, mtna,
+    
+    begdt, enddt,
+    cusip8, ncusip, first_offer_dt,
+    mgmt_name, mgmt_cd,
+    mgr_name, mgr_dt,
+    adv_name, open_to_inv,
+    m_fund,
+    index_fund_flag, vau_fund, et_flag,
+    end_dt, dead_flag, delist_cd, merge_fundno
+  )
 
-head(mf_with_names, 20)
+ 
 
 # Display results of the collected data
 summary_tbl <- mf_with_names %>%
