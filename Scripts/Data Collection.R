@@ -6,7 +6,7 @@ library(dplyr)
 library(DBI)
 library(lubridate)
 library(openxlsx)
-
+library(here)
 
 
 # Wrds connection
@@ -104,7 +104,7 @@ mf_with_names <- mf_with_names %>%
     end_dt, dead_flag, delist_cd, merge_fundno
   )
 
- 
+
 
 # Display results of the collected data
 summary_tbl <- mf_with_names %>%
@@ -125,27 +125,30 @@ View(summary_tbl)
 summary_tbl
 
 #==================== SAVE mf_with_names TO ONE CSV (NO ROW LIMIT) ====================
-
-# Fast writer (recommended for millions of rows)
 if (!requireNamespace("data.table", quietly = TRUE)) install.packages("data.table")
 library(data.table)
 
-# 1) Output folder inside your project directory
-out_dir <- file.path(getwd(), "R Raw Data")
+# Force NON-OneDrive Desktop project root, then use relative paths from it
+proj_root <- normalizePath(
+  file.path(Sys.getenv("USERPROFILE"),
+            "Desktop", "Research Github", "AccountingResearch"),
+  winslash = "/", mustWork = TRUE
+)
+
+out_dir <- file.path(proj_root, "R Raw Data")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-# 2) Output file name (single file)
 csv_file <- file.path(out_dir, "mf_with_names_2015_2026.csv")
 
-# 3) Write single CSV (no Excel row limit)
 data.table::fwrite(
   x = mf_with_names,
   file = csv_file,
   sep = ",",
   quote = TRUE,
   na = "",
-  bom = TRUE            # helps Excel detect UTF-8 (optional)
+  bom = TRUE
 )
 
-message("Saved CSV to: ", csv_file)
-
+cat("Project root:", proj_root, "\n")
+cat("Saved CSV to :", csv_file, "\n")
+stopifnot(file.exists(csv_file))

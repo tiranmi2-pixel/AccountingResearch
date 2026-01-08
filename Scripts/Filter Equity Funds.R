@@ -3,15 +3,27 @@ library(DBI)
 library(dplyr)
 library(lubridate)
 library(data.table)
+library(here)
 
 stopifnot(exists("wrds"), exists("mf_with_names"))
 
 #-----------------------
 # 0) Output path (same folder as before)
 #-----------------------
-out_dir  <- file.path(getwd(), "R Raw Data")
+proj_root <- normalizePath(
+  file.path(Sys.getenv("USERPROFILE"),
+            "Desktop", "Research Github", "AccountingResearch"),
+  winslash = "/", mustWork = TRUE
+)
+
+out_dir  <- file.path(proj_root, "R Raw Data")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
 out_file <- file.path(out_dir, "Raw Data- After fil for equity.csv")
+
+cat("Project root:", proj_root, "\n")
+cat("Saving to    :", out_file, "\n")
+stopifnot(dir.exists(out_dir))
 
 #-----------------------
 # 1) Pick style table (prefer crsp_q_mutualfunds.fund_summary2)
