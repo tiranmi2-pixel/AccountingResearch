@@ -71,7 +71,7 @@ proj_root <- normalizePath(
 mf_monthly_df <- dbGetQuery(wrds, "
   SELECT crsp_fundno, caldt, mret, mnav, mtna
   FROM crsp.monthly_tna_ret_nav
-  WHERE caldt BETWEEN '2015-01-01' AND '2026-12-31'
+  WHERE caldt BETWEEN '2005-01-01' AND '2026-12-31'
 ")
 
 mf_monthly_df$caldt <- as.Date(mf_monthly_df$caldt)
@@ -161,7 +161,8 @@ style_df <- dbGetQuery(wrds, sprintf("
     crsp_portno,
     caldt AS style_dt,
     lipper_asset_cd,
-    policy
+    policy,
+    fiscal_yearend
   FROM crsp_q_mutualfunds.fund_summary2
   WHERE caldt BETWEEN '%s' AND '%s'
 ", format(min_dt, "%Y-%m-%d"), format(max_dt, "%Y-%m-%d")))
@@ -189,7 +190,8 @@ sty_at_month <- style_df[
   .(crsp_portno = i.crsp_portno,
     caldt       = i.month_dt,
     lipper_asset_cd,
-    policy)
+    policy,
+    fiscal_yearend)
 ]
 
 setkey(sty_at_month, crsp_portno, caldt)
@@ -197,15 +199,79 @@ sty_at_month <- unique(sty_at_month, by = key(sty_at_month))
 
 mf_tmp[sty_at_month,
        `:=`(lipper_asset_cd = i.lipper_asset_cd,
-            policy          = i.policy),
+            policy          = i.policy,
+            fiscal_yearend  = i.fiscal_yearend),
        on = .(crsp_portno, caldt)]
+
+# -----------------------
+# Step 5B: add CIK fields (company / series / contract) from crsp_q_mutualfunds.crsp_cik_map
+# Key: crsp_fundno
+# -----------------------
+
+pad_cik10 <- function(x) {
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA_character_
+  x <- sub("\\.0+$", "", x)  # strip "1234.0" if present
+  ifelse(
+    !is.na(x) & grepl("^[0-9]+$", x),
+    sprintf("%010d", as.integer(x)),
+    x
+  )
+}
+
+cik_map <- data.table::as.data.table(DBI::dbGetQuery(wrds, "
+  SELECT crsp_fundno, comp_cik, series_cik, contract_cik
+  FROM crsp_q_mutualfunds.crsp_cik_map
+"))
+
+# Standardize types + pad
+cik_map[, crsp_fundno := as.numeric(crsp_fundno)]
+cik_map[, comp_cik     := pad_cik10(comp_cik)]
+cik_map[, series_cik   := pad_cik10(series_cik)]
+cik_map[, contract_cik := pad_cik10(contract_cik)]
+
+# One row per fundno (if duplicates exist, keep the most informative)
+cik_map[, score := (!is.na(series_cik) & nzchar(series_cik)) +
+          (!is.na(contract_cik) & nzchar(contract_cik)) +
+          (!is.na(comp_cik) & nzchar(comp_cik))]
+data.table::setorder(cik_map, crsp_fundno, -score)
+cik_map <- unique(cik_map, by = "crsp_fundno")
+cik_map[, score := NULL]
+
+# Attach to mf_tmp (data.table) by fundno
+data.table::setkey(mf_tmp, crsp_fundno)
+data.table::setkey(cik_map, crsp_fundno)
+
+mf_tmp[
+  cik_map,
+  `:=`(
+    comp_cik     = i.comp_cik,
+    series_cik   = i.series_cik,
+    contract_cik = i.contract_cik
+  )
+]
+
+
+mf_tmp[, cik_best := data.table::fifelse(
+  !is.na(series_cik) & nzchar(series_cik), series_cik,
+  data.table::fifelse(
+    !is.na(contract_cik) & nzchar(contract_cik), contract_cik,
+    data.table::fifelse(
+      !is.na(comp_cik) & nzchar(comp_cik), comp_cik,
+      NA_character_
+    )
+  )
+)]
+
+
 
 mf_with_names <- as.data.frame(mf_tmp)
 
-# Keep your base “identifiers-left” order exactly as you had
+# Keep  base “identifiers-left” order exactly as you had
 mf_with_names <- mf_with_names %>%
   select(
     crsp_fundno, crsp_portno, ticker, fund_name,
+    comp_cik, series_cik, contract_cik, cik_best,
     lipper_asset_cd, policy,
     city, state, website,
     crsp_cl_grp, retail_fund, inst_fund,

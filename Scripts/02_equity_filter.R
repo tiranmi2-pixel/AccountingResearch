@@ -1,12 +1,9 @@
 # ===================== 02_equity_filter.R =====================
 # PURPOSE:
-#  1) Add crsp_obj_cd (as-of) using your existing style-table logic
+#  1) Add crsp_obj_cd (as-of) using  existing style-table logic
 #  2) Filter dt to US domestic equity funds
 #  3) Auto-run Script 03
 #
-# NOTE:
-#  - No CSV I/O. dt stays in memory.
-#  - Existing column order is preserved; only new columns are appended to the right.
 
 library(DBI)
 library(dplyr)
@@ -131,7 +128,7 @@ setkey(sty_at_month, style_id, caldt)
 sty_at_month <- unique(sty_at_month, by = key(sty_at_month))
 
 # -----------------------
-# 4) Update-join into dt (APPENDS cols; no reorder)
+# 4) Update join into dt (APPENDS cols; no reorder)
 # -----------------------
 dt[, style_id := as.numeric(get(id_col))]
 setkey(dt, style_id, caldt)
@@ -152,21 +149,173 @@ new_cols <- setdiff(names(dt), old_cols)
 setcolorder(dt, c(old_cols, new_cols))
 
 # -----------------------
-# 5) Filter: US domestic equity (your logic)
+# 5) Filter: ETFs/ETNs -> Index funds -> CRSP ED -> Lipper validation 
 # -----------------------
-dt[, index_fund_flag := toupper(trimws(index_fund_flag))]
+
+# Normalize flags/codes
 dt[, et_flag         := toupper(trimws(et_flag))]
+dt[, index_fund_flag := toupper(trimws(index_fund_flag))]
 dt[, crsp_obj_cd     := toupper(trimws(crsp_obj_cd))]
 dt[, lipper_asset_cd := toupper(trimws(lipper_asset_cd))]
 
-dt <- dt[
-  !is.na(crsp_obj_cd) &
-    substr(crsp_obj_cd, 1, 2) == "ED" &
-    lipper_asset_cd == "EQ" &
-    (is.na(index_fund_flag) | index_fund_flag == "")
-  # Optional ETF/ETN exclusion:
-  # & (is.na(et_flag) | et_flag == "")
-]
+# -----------------------
+# 5.0 INFO-ONLY: Export filter drop summary for analysis window (2021-2025)
+#   - Uses a TEMP copy (dt_tmp) so it does NOT affect dt
+#   - Counts unique funds (crsp_fundno) + portfolios + rows at each step
+#   - Also reports Lipper match vs mismatch among CRSP-ED funds
+# -----------------------
+analysis_start <- as.Date("2021-01-01")
+analysis_end   <- as.Date("2025-12-31")
+
+dt_tmp <- copy(dt)[caldt >= analysis_start & caldt <= analysis_end]
+
+# Helper: core counts
+count_step <- function(DT) {
+  list(
+    n_funds  = uniqueN(DT$crsp_fundno),
+    n_portno = if ("crsp_portno" %in% names(DT)) uniqueN(DT$crsp_portno) else NA_integer_,
+    n_rows   = nrow(DT)
+  )
+}
+
+# Helper: Lipper vs CRSP-ED validation counts (unique funds)
+count_lipper_vs_ed <- function(DT) {
+  per_fund <- DT[, .(
+    has_lipper = any(!is.na(lipper_asset_cd) & lipper_asset_cd != ""),
+    any_eq     = any(lipper_asset_cd == "EQ", na.rm = TRUE),
+    any_noneq  = any(!is.na(lipper_asset_cd) & lipper_asset_cd != "" & lipper_asset_cd != "EQ")
+  ), by = crsp_fundno]
+  
+  list(
+    ed_lipper_eq_funds      = per_fund[has_lipper == TRUE  & any_eq == TRUE & any_noneq == FALSE, .N],
+    ed_lipper_non_eq_funds  = per_fund[has_lipper == TRUE  & any_noneq == TRUE, .N],
+    ed_lipper_missing_funds = per_fund[has_lipper == FALSE, .N],
+    ed_lipper_present_funds = per_fund[has_lipper == TRUE, .N]
+  )
+}
+# steps table with extra columns (default NA until we fill them)
+steps <- data.table(
+  step = character(),
+  n_funds = integer(),
+  n_portno = integer(),
+  n_rows = integer(),
+  ed_lipper_eq_funds = as.integer(NA),
+  ed_lipper_non_eq_funds = as.integer(NA),
+  ed_lipper_missing_funds = as.integer(NA),
+  ed_lipper_present_funds = as.integer(NA)
+)
+
+# Step A: starting universe in 2021-2025
+c0 <- count_step(dt_tmp)
+steps <- rbind(steps, data.table(
+  step="Start (all funds in dt, 2021-2025)",
+  n_funds=c0$n_funds, n_portno=c0$n_portno, n_rows=c0$n_rows,
+  ed_lipper_eq_funds=NA_integer_, ed_lipper_non_eq_funds=NA_integer_,
+  ed_lipper_missing_funds=NA_integer_, ed_lipper_present_funds=NA_integer_
+))
+
+# Step B: exclude ETFs/ETNs using exact CRSP codes (F=ETF, N=ETN)
+dt_tmp <- dt_tmp[!(et_flag %in% c("F","N"))]
+c1 <- count_step(dt_tmp)
+steps <- rbind(steps, data.table(
+  step="After ETF/ETN exclusion (drop et_flag F/N)",
+  n_funds=c1$n_funds, n_portno=c1$n_portno, n_rows=c1$n_rows,
+  ed_lipper_eq_funds=NA_integer_, ed_lipper_non_eq_funds=NA_integer_,
+  ed_lipper_missing_funds=NA_integer_, ed_lipper_present_funds=NA_integer_
+))
+
+# Step C: exclude index funds using exact CRSP codes (B/D/E)
+dt_tmp <- dt_tmp[!(index_fund_flag %in% c("B","D","E"))]
+c2 <- count_step(dt_tmp)
+steps <- rbind(steps, data.table(
+  step="After index exclusion (drop index_fund_flag B/D/E)",
+  n_funds=c2$n_funds, n_portno=c2$n_portno, n_rows=c2$n_rows,
+  ed_lipper_eq_funds=NA_integer_, ed_lipper_non_eq_funds=NA_integer_,
+  ed_lipper_missing_funds=NA_integer_, ed_lipper_present_funds=NA_integer_
+))
+
+# Step D: keep Domestic Equity by CRSP objective code ED**
+dt_tmp <- dt_tmp[!is.na(crsp_obj_cd) & substr(crsp_obj_cd, 1, 2) == "ED"]
+c3 <- count_step(dt_tmp)
+
+lip3 <- count_lipper_vs_ed(dt_tmp)
+
+steps <- rbind(steps, data.table(
+  step="After CRSP objective filter (crsp_obj_cd starts ED)",
+  n_funds=c3$n_funds, n_portno=c3$n_portno, n_rows=c3$n_rows,
+  ed_lipper_eq_funds=lip3$ed_lipper_eq_funds,
+  ed_lipper_non_eq_funds=lip3$ed_lipper_non_eq_funds,
+  ed_lipper_missing_funds=lip3$ed_lipper_missing_funds,
+  ed_lipper_present_funds=lip3$ed_lipper_present_funds
+))
+
+# Step E: Lipper validation when available:
+#     Keep EQ; if missing/blank keep; otherwise drop.
+dt_tmp <- dt_tmp[is.na(lipper_asset_cd) | lipper_asset_cd == "" | lipper_asset_cd == "EQ"]
+c4 <- count_step(dt_tmp)
+
+# (optional) also show the “post-validation” breakdown (unmatched should be 0 by construction)
+lip4 <- count_lipper_vs_ed(dt_tmp)
+
+steps <- rbind(steps, data.table(
+  step="After Lipper validation (EQ if available; keep if missing)",
+  n_funds=c4$n_funds, n_portno=c4$n_portno, n_rows=c4$n_rows,
+  ed_lipper_eq_funds=lip4$ed_lipper_eq_funds,
+  ed_lipper_non_eq_funds=lip4$ed_lipper_non_eq_funds,
+  ed_lipper_missing_funds=lip4$ed_lipper_missing_funds,
+  ed_lipper_present_funds=lip4$ed_lipper_present_funds
+))
+
+# Add drop columns (fund counts)
+steps[, drop_funds_from_prev := shift(n_funds, 1L) - n_funds]
+steps[, drop_funds_from_prev := fifelse(is.na(drop_funds_from_prev), 0L, drop_funds_from_prev)]
+steps[, drop_funds_pct_prev := fifelse(shift(n_funds, 1L) > 0, 100 * drop_funds_from_prev / shift(n_funds, 1L), NA_real_)]
+
+steps[, drop_funds_from_start := steps$n_funds[1] - n_funds]
+
+base_n <- steps$n_funds[1]
+if (isTRUE(base_n > 0)) {
+  steps[, drop_funds_pct_start := 100 * drop_funds_from_start / base_n]
+} else {
+  steps[, drop_funds_pct_start := NA_real_]
+}
+
+# Extra interpretability columns 
+steps[, `:=`(
+  pct_lipper_present = fifelse(n_funds > 0, 100 * ed_lipper_present_funds / n_funds, NA_real_),
+  pct_lipper_mismatch_present = fifelse(ed_lipper_present_funds > 0,
+                                        100 * ed_lipper_non_eq_funds / ed_lipper_present_funds,
+                                        NA_real_)
+)]
+
+# Save CSV (info-only)
+out_dir <- file.path(proj_root, "R Raw Data")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+summary_file <- file.path(out_dir, "filter_drop_summary_2021_2025_with_lipper_match.csv")
+fwrite(steps, summary_file)
+
+cat("[02] Saved filter drop summary to:", summary_file, "\n")
+
+
+
+
+
+# 5.1 Exclude ETFs/ETNs (CRSP: F=ETF, N=ETN). Keep blank/NA.
+dt <- dt[!(et_flag %in% c("F","N"))]
+
+
+# 5.2 Exclude index funds (CRSP: B/D/E). Keep blank/NA.
+dt <- dt[!(index_fund_flag %in% c("B","D","E"))]
+
+# 5.3 Keep Domestic Equity by CRSP objective code (ED**)
+dt <- dt[!is.na(crsp_obj_cd) & substr(crsp_obj_cd, 1, 2) == "ED"]
+
+# 5.4 Lipper validation when available:
+#     Keep EQ; if missing/blank keep (prioritize CRSP); otherwise drop.
+dt <- dt[is.na(lipper_asset_cd) | lipper_asset_cd == "" | lipper_asset_cd == "EQ"]
+
+
 
 # Keep dt sorted
 setorder(dt, crsp_fundno, caldt)
@@ -177,4 +326,5 @@ cat("\n[02] Equity filter applied.\n")
 cat("[02] Rows:", nrow(dt), " Cols:", ncol(dt), "\n")
 
 # Auto-run Script 03
+source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
 source(file.path(proj_root, "Scripts", "03_alphas_market_adjusted_returns.R"))

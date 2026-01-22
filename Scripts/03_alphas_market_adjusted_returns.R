@@ -6,9 +6,6 @@
 #  4) Trailing compounded returns (fund + market, 12/60/120) and market-adjusted excess
 #  5) Auto-run Script 04
 #
-# RULE:
-#  - Preserve dt's existing column order.
-#  - Only append new columns to the far right.
 
 library(data.table)
 
@@ -25,7 +22,7 @@ if (is.finite(mean(abs(dt$mret), na.rm=TRUE)) && mean(abs(dt$mret), na.rm=TRUE) 
 setorder(dt, crsp_fundno, caldt)
 
 # -----------------------
-# A) Add FF factors by update-join (no column reorder)
+# A) Add FF factors by update-join 
 # -----------------------
 ff_dt <- copy(as.data.table(ff))
 ff_dt[, caldt := as.Date(caldt)]
@@ -60,9 +57,9 @@ if (!("flow" %in% names(dt))) {
 if (!("flow_l1" %in% names(dt))) dt[, flow_l1 := shift(flow, 1L), by = crsp_fundno]
 
 # -----------------------
-# C) Rolling alphas (same logic)
+# C) Rolling alphas (tolerant windows via min_obs)
 # -----------------------
-roll_alpha_dt <- function(y_vec, X_mat, width) {
+roll_alpha_dt <- function(y_vec, X_mat, width, min_obs = width) {
   n <- length(y_vec)
   if (n < width) return(rep(NA_real_, n))
   
@@ -77,7 +74,7 @@ roll_alpha_dt <- function(y_vec, X_mat, width) {
       XX <- X_mat[w_idx, , drop = FALSE]
       
       ok <- is.finite(yy) & apply(XX, 1, function(r) all(is.finite(r)))
-      if (sum(ok) < width) return(NA_real_)
+      if (sum(ok) < min_obs) return(NA_real_)
       
       fit <- lm.fit(x = cbind(1, XX[ok, , drop = FALSE]), y = yy[ok])
       as.numeric(fit$coefficients[1])
@@ -87,6 +84,7 @@ roll_alpha_dt <- function(y_vec, X_mat, width) {
 
 dt[, c("alpha_capm_12m","alpha_capm_24m","alpha_capm_36m",
        "alpha_carhart_12m","alpha_carhart_24m","alpha_carhart_36m") := {
+         
          y_vec <- exret
          X_capm_mat    <- as.matrix(mktrf)
          X_carhart_mat <- as.matrix(cbind(mktrf, smb, hml, umd))
@@ -101,8 +99,23 @@ dt[, c("alpha_capm_12m","alpha_capm_24m","alpha_capm_36m",
          )
        }, by = crsp_fundno]
 
+
+
+# ---- helper: trailing compounded return with minimum valid-month threshold ----
+trail_cumret <- function(r, n, min_obs = n) {
+  ok <- is.finite(r) & (r > -1)           # log1p defined only if r > -1
+  lr <- fifelse(ok, log1p(r), NA_real_)   # log-returns, NA where missing/invalid
+  
+  s_lr <- frollsum(lr, n = n, align = "right", na.rm = TRUE)
+  n_ok <- frollsum(ok, n = n, align = "right", na.rm = TRUE)
+  
+  out <- exp(s_lr) - 1
+  out[n_ok < min_obs] <- NA_real_         # <-- threshold here
+  out
+}
+
 # -----------------------
-# D) Trailing returns (same logic)
+# D) Trailing returns
 # -----------------------
 idx <- as.data.table(mkt_idx_df)
 idx[, caldt := as.Date(caldt)]
@@ -110,9 +123,9 @@ idx[, mkt_ret := as.numeric(mkt_ret)]
 setorder(idx, caldt)
 
 idx[, `:=`(
-  mkt_ret_12m  = exp(frollsum(log1p(mkt_ret),  12L, align = "right")) - 1,
-  mkt_ret_60m  = exp(frollsum(log1p(mkt_ret),  60L, align = "right")) - 1,
-  mkt_ret_120m = exp(frollsum(log1p(mkt_ret), 120L, align = "right")) - 1
+  mkt_ret_12m  = trail_cumret(mkt_ret,  12L, min_obs = 11L),
+  mkt_ret_60m  = trail_cumret(mkt_ret,  60L, min_obs = 57L),
+  mkt_ret_120m = trail_cumret(mkt_ret, 120L, min_obs = 114L)
 )]
 
 # Add market series via update-join (no reorder)
@@ -130,9 +143,9 @@ dt[idx, `:=`(
 
 # Fund trailing returns
 dt[, `:=`(
-  fund_ret_12m  = exp(frollsum(log1p(mret),  12L, align = "right")) - 1,
-  fund_ret_60m  = exp(frollsum(log1p(mret),  60L, align = "right")) - 1,
-  fund_ret_120m = exp(frollsum(log1p(mret), 120L, align = "right")) - 1
+  fund_ret_12m  = trail_cumret(mret,  12L, min_obs = 11L),
+  fund_ret_60m  = trail_cumret(mret,  60L, min_obs = 57L),
+  fund_ret_120m = trail_cumret(mret, 120L, min_obs = 114L)
 ), by = crsp_fundno]
 
 # Market-adjusted
@@ -141,6 +154,11 @@ dt[, `:=`(
   excess_ret_60m  = fund_ret_60m  - mkt_ret_60m,
   excess_ret_120m = fund_ret_120m - mkt_ret_120m
 )]
+
+
+cat("[03] Non-missing fund_ret_120m:", sum(!is.na(dt$fund_ret_120m)), "\n")
+cat("[03] Non-missing mkt_ret_120m :", sum(!is.na(dt$mkt_ret_120m)), "\n")
+cat("[03] Non-missing excess_ret_120m:", sum(!is.na(dt$excess_ret_120m)), "\n")
 
 # -----------------------
 # E) Preserve original order; append new columns to the far right
