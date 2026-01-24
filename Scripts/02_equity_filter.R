@@ -1,23 +1,31 @@
 # ===================== 02_equity_filter.R =====================
 # PURPOSE:
-#  1) Add crsp_obj_cd (as-of) using  existing style-table logic
+#  1) Add crsp_obj_cd (as-of) using existing style-table logic
 #  2) Filter dt to US domestic equity funds
 #  3) Auto-run Script 03
-#
 
+# =====================================================================
+# ==== Libraries + basic sanity checks ====
+# =====================================================================
 library(DBI)
 library(dplyr)
 library(lubridate)
 library(data.table)
 
+# We expect Script 01 to have already created these in memory
 stopifnot(exists("wrds"), exists("dt"), exists("proj_root"))
 
+# Make sure we're working with a data.table (in-place updates below rely on that)
 setDT(dt)
+
+# We'll use this to preserve the original column order and only append new ones to the right
 old_cols <- names(dt)  # preserve existing order
 
-# -----------------------
-# 1) Pick style table (prefer crsp_q_mutualfunds.fund_summary2)
-# -----------------------
+# =====================================================================
+# ==== 1) Pick a "style" table to pull obj/policy/lipper from ====
+# =====================================================================
+# Goal here: choose the best available fund_summary table and decide whether we join by portno or fundno.
+# We prefer crsp_q_mutualfunds.fund_summary2 if it has a usable ID column.
 preferred <- dbGetQuery(wrds, "
   SELECT
     MAX(CASE WHEN column_name='crsp_portno' THEN 1 ELSE 0 END) AS has_portno,
@@ -29,10 +37,12 @@ preferred <- dbGetQuery(wrds, "
 ")
 
 if (nrow(preferred) == 1 && (preferred$has_portno == 1 || preferred$has_fundno == 1)) {
+  # Nice — we can use the preferred schema/table
   style_schema <- "crsp_q_mutualfunds"
   style_table  <- "fund_summary2"
   id_col       <- if (preferred$has_portno == 1) "crsp_portno" else "crsp_fundno"
 } else {
+  # Fallback: scan for a usable fund_summary/fund_summary2 table in any crsp* schema
   style_candidates <- dbGetQuery(wrds, "
     WITH cols AS (
       SELECT
@@ -69,9 +79,10 @@ if (nrow(preferred) == 1 && (preferred$has_portno == 1 || preferred$has_fundno =
 
 message("[02] Using style table: ", style_schema, ".", style_table, " (ID = ", id_col, ")")
 
-# -----------------------
-# 2) Pull style fields
-# -----------------------
+# =====================================================================
+# ==== 2) Pull style fields for the dt date range ====
+# =====================================================================
+# Pull just the time window we need (keeps this lighter and avoids unnecessary rows)
 min_dt <- as.Date(min(dt$caldt, na.rm = TRUE))
 max_dt <- as.Date(max(dt$caldt, na.rm = TRUE))
 
@@ -88,23 +99,27 @@ style_sql <- sprintf("
 
 style_df <- dbGetQuery(wrds, style_sql)
 setDT(style_df)
+
+# Standardize types/formatting so joins & comparisons behave consistently
 style_df[, style_id := as.numeric(style_id)]
 style_df[, style_dt := as.Date(style_dt)]
 style_df[, crsp_obj_cd := toupper(trimws(crsp_obj_cd))]
 style_df[, policy := toupper(trimws(policy))]
 style_df[, lipper_asset_cd := toupper(trimws(lipper_asset_cd))]
 
-# keep only IDs in sample
+# Keep only IDs actually present in our panel (no point carrying unrelated rows)
 ids_in_sample <- unique(as.numeric(dt[[id_col]]))
 style_df <- style_df[style_id %in% ids_in_sample]
 
-# dedupe
+# Dedupe on (style_id, style_dt) so the as-of join is stable/deterministic
 setkey(style_df, style_id, style_dt)
 style_df <- unique(style_df, by = key(style_df))
 
-# -----------------------
-# 3) As-of join to monthly panel (same logic; fixes i.month_dt scope)
-# -----------------------
+# =====================================================================
+# ==== 3) As-of join style -> monthly panel (rolling "last known" value) ====
+# =====================================================================
+# We build a unique (style_id, month_dt) key list from dt, then roll style_dt backwards.
+# This is the classic "as-of" / "last observation carried forward" pattern.
 mfk <- unique(data.table(
   style_id = as.numeric(dt[[id_col]]),
   month_dt = as.Date(dt$caldt)
@@ -127,9 +142,10 @@ sty_at_month <- style_df[
 setkey(sty_at_month, style_id, caldt)
 sty_at_month <- unique(sty_at_month, by = key(sty_at_month))
 
-# -----------------------
-# 4) Update join into dt (APPENDS cols; no reorder)
-# -----------------------
+# =====================================================================
+# ==== 4) Update-join into dt (append columns, don't reorder) ====
+# =====================================================================
+# We temporarily create a numeric style_id column in dt so the join key matches style_df/sty_at_month.
 dt[, style_id := as.numeric(get(id_col))]
 setkey(dt, style_id, caldt)
 
@@ -142,34 +158,34 @@ dt[sty_at_month,
    on = .(style_id, caldt)
 ]
 
+# Clean up the temporary join key once we're done
 dt[, style_id := NULL]
 
-# Preserve existing order; append new cols at right
+# Preserve existing order; any brand-new columns should end up on the far right
 new_cols <- setdiff(names(dt), old_cols)
 setcolorder(dt, c(old_cols, new_cols))
 
-# -----------------------
-# 5) Filter: ETFs/ETNs -> Index funds -> CRSP ED -> Lipper validation 
-# -----------------------
+# =====================================================================
+# ==== 5) Equity filtering logic (ETFs/ETNs -> Index -> CRSP ED -> Lipper check) ====
+# =====================================================================
 
-# Normalize flags/codes
+# Normalize flags/codes so comparisons like %in% and substr checks behave reliably
 dt[, et_flag         := toupper(trimws(et_flag))]
 dt[, index_fund_flag := toupper(trimws(index_fund_flag))]
 dt[, crsp_obj_cd     := toupper(trimws(crsp_obj_cd))]
 dt[, lipper_asset_cd := toupper(trimws(lipper_asset_cd))]
 
-# -----------------------
-# 5.0 INFO-ONLY: Export filter drop summary for analysis window (2021-2025)
-#   - Uses a TEMP copy (dt_tmp) so it does NOT affect dt
-#   - Counts unique funds (crsp_fundno) + portfolios + rows at each step
-#   - Also reports Lipper match vs mismatch among CRSP-ED funds
-# -----------------------
+# ---------------------------------------------------------------------
+# ==== 5.0 INFO-ONLY: Export filter drop summary for 2021-2025 window ====
+# ---------------------------------------------------------------------
+# Important: this uses a TEMP copy (dt_tmp) and does NOT change dt.
+# We track counts as we apply each filter step, plus a quick Lipper-vs-CRSP-ED sanity check.
 analysis_start <- as.Date("2021-01-01")
 analysis_end   <- as.Date("2025-12-31")
 
 dt_tmp <- copy(dt)[caldt >= analysis_start & caldt <= analysis_end]
 
-# Helper: core counts
+# Helper: core counts at a step (unique funds, portfolios, rows)
 count_step <- function(DT) {
   list(
     n_funds  = uniqueN(DT$crsp_fundno),
@@ -178,7 +194,8 @@ count_step <- function(DT) {
   )
 }
 
-# Helper: Lipper vs CRSP-ED validation counts (unique funds)
+# Helper: among CRSP-ED funds, how often does Lipper agree/disagree/missing?
+# This is computed per fund (crsp_fundno) so we don't over-count monthly rows.
 count_lipper_vs_ed <- function(DT) {
   per_fund <- DT[, .(
     has_lipper = any(!is.na(lipper_asset_cd) & lipper_asset_cd != ""),
@@ -193,7 +210,8 @@ count_lipper_vs_ed <- function(DT) {
     ed_lipper_present_funds = per_fund[has_lipper == TRUE, .N]
   )
 }
-# steps table with extra columns (default NA until we fill them)
+
+# Steps table (extra columns default to NA until we fill them)
 steps <- data.table(
   step = character(),
   n_funds = integer(),
@@ -266,7 +284,7 @@ steps <- rbind(steps, data.table(
   ed_lipper_present_funds=lip4$ed_lipper_present_funds
 ))
 
-# Add drop columns (fund counts)
+# Add drop columns (fund counts) so the CSV is easy to scan
 steps[, drop_funds_from_prev := shift(n_funds, 1L) - n_funds]
 steps[, drop_funds_from_prev := fifelse(is.na(drop_funds_from_prev), 0L, drop_funds_from_prev)]
 steps[, drop_funds_pct_prev := fifelse(shift(n_funds, 1L) > 0, 100 * drop_funds_from_prev / shift(n_funds, 1L), NA_real_)]
@@ -280,7 +298,7 @@ if (isTRUE(base_n > 0)) {
   steps[, drop_funds_pct_start := NA_real_]
 }
 
-# Extra interpretability columns 
+# Extra interpretability columns (how often Lipper is present + mismatch rate among present)
 steps[, `:=`(
   pct_lipper_present = fifelse(n_funds > 0, 100 * ed_lipper_present_funds / n_funds, NA_real_),
   pct_lipper_mismatch_present = fifelse(ed_lipper_present_funds > 0,
@@ -297,13 +315,12 @@ fwrite(steps, summary_file)
 
 cat("[02] Saved filter drop summary to:", summary_file, "\n")
 
-
-
-
+# ---------------------------------------------------------------------
+# ==== 5.1–5.4 Apply the same filters to the REAL dt (this changes dt) ====
+# ---------------------------------------------------------------------
 
 # 5.1 Exclude ETFs/ETNs (CRSP: F=ETF, N=ETN). Keep blank/NA.
 dt <- dt[!(et_flag %in% c("F","N"))]
-
 
 # 5.2 Exclude index funds (CRSP: B/D/E). Keep blank/NA.
 dt <- dt[!(index_fund_flag %in% c("B","D","E"))]
@@ -315,16 +332,19 @@ dt <- dt[!is.na(crsp_obj_cd) & substr(crsp_obj_cd, 1, 2) == "ED"]
 #     Keep EQ; if missing/blank keep (prioritize CRSP); otherwise drop.
 dt <- dt[is.na(lipper_asset_cd) | lipper_asset_cd == "" | lipper_asset_cd == "EQ"]
 
+# =====================================================================
+# ==== Finalize + hand off to downstream scripts ====
+# =====================================================================
 
-
-# Keep dt sorted
+# Keep dt sorted (helps rolling calcs later and makes debugging easier)
 setorder(dt, crsp_fundno, caldt)
 
+# Update the global dt so the next scripts pick up the filtered panel
 assign("dt", dt, envir = .GlobalEnv)
 
 cat("\n[02] Equity filter applied.\n")
 cat("[02] Rows:", nrow(dt), " Cols:", ncol(dt), "\n")
 
-# Auto-run Script 03
+# Auto-run Script 03 (and TSR distribution attach script)
 source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
 source(file.path(proj_root, "Scripts", "03_alphas_market_adjusted_returns.R"))
