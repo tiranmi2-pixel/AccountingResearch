@@ -315,6 +315,49 @@ fwrite(steps, summary_file)
 
 cat("[02] Saved filter drop summary to:", summary_file, "\n")
 
+
+# =====================================================================
+# ==== SNAPSHOT: save UNFILTERED universe with "final columns" ====
+# =====================================================================
+# Place this RIGHT BEFORE you start filtering dt (before 5.1).
+# This will:
+#   1) Copy the full, unfiltered dt (after style join)
+#   2) Run 02b + 03 + 04 on the COPY (so it gets TSR + alphas + controls)
+#   3) Save a single CSV with ALL columns, but NO equity/ETF/index filters applied
+
+library(data.table)
+stopifnot(exists("dt"), exists("proj_root"))
+
+# 0) Make an unfiltered snapshot now (this is the key moment)
+dt_unfilt <- copy(dt)
+
+# 1) Temporarily swap global dt to the snapshot and run the enrichment pipeline on it
+dt_saved_for_filters <- copy(dt)              # keep the working dt safe
+assign("dt", dt_unfilt, envir = .GlobalEnv)   # downstream scripts read/write global dt
+
+# Run the “final-column” builders on the unfiltered snapshot
+source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
+source(file.path(proj_root, "Scripts", "03_alphas_market_adjusted_returns.R"))
+source(file.path(proj_root, "Scripts", "04_controls_and_save.R"))
+
+# Pull the enriched unfiltered dt back out
+dt_unfilt_final <- copy(get("dt", envir = .GlobalEnv))
+
+# 2) Restore the original dt so your equity filtering continues exactly as before
+assign("dt", dt_saved_for_filters, envir = .GlobalEnv)
+rm(dt_saved_for_filters)
+
+# 3) Write the unfiltered “ALL FINAL COLS” CSV
+out_dir <- file.path(proj_root, "R Raw Data")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+unfilt_csv <- file.path(out_dir, "mf_unfiltered_all_final_columns.csv")
+fwrite(dt_unfilt_final, unfilt_csv)
+
+cat("[02] Saved UNFILTERED all-final-columns CSV to:", unfilt_csv, "\n")
+cat("[02] Unfiltered rows:", nrow(dt_unfilt_final), " cols:", ncol(dt_unfilt_final), "\n")
+
+
 # ---------------------------------------------------------------------
 # ==== 5.1–5.4 Apply the same filters to the REAL dt (this changes dt) ====
 # ---------------------------------------------------------------------
