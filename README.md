@@ -322,7 +322,7 @@ AccountingResearch/
 │  ├─ 05_filter_equity_funds.R
 │  └─ 06_Create Samples.R
 │
-├─ R Raw Data/   [Important - Folder link](https://drive.google.com/drive/folders/1yWs9PBoXDkqW1r-EQgwt7rFwvCFhRva3?usp=sharing)
+├─ R Raw Data/   
 │  ├─ mf_with_names_2015_2026_equity_perf_controls.csv
 │  ├─ mf_unfiltered_all_final_columns.csv
 │  ├─ filter_drop_summary_2021_2025_with_lipper_match.csv
@@ -330,7 +330,10 @@ AccountingResearch/
 │  ├─ mf_with_names_2015_2026_equity_perf_controls_EVENTWIN_PRE24_POST24_byTSR.csv
 │  └─ mf_with_names_2015_2026_equity_perf_controls_CALWIN_2022_2025_end2025-12-31.csv
 │
-└─ (optional) TSR reports/     [Important - Folder link](https://drive.google.com/drive/folders/1h5ojtapR1Is6RI-xLVu1_4eboPaZOPT_)
+└─ (optional) TSR reports/     
+
+- [Folder link to download outputs from the R code](https://drive.google.com/drive/folders/1yWs9PBoXDkqW1r-EQgwt7rFwvCFhRva3?usp=sharing)
+- [Folder link to view downloaded NCSR reports](https://drive.google.com/drive/folders/1h5ojtapR1Is6RI-xLVu1_4eboPaZOPT_)
 
 
 
