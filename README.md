@@ -79,7 +79,7 @@ The workflow is designed as a sequential build → filter → combine → save p
 
 **Finalizing**
 
-* After filtering the exisitng data using the criterias explained above, it auto-runs the below two scripts to obtain estimated tsr distribution date and derive alphas and market adjsuted returns:
+* After filtering the exisitng data using the criterias explained above, it auto-runs the below two scripts to obtain estimated TSR distribution date and derive alphas and market adjusted returns:
 
   * `02b_tsr_approx_distribution.R`
   * `03_alphas_market_adjusted_returns.R` 
@@ -87,7 +87,7 @@ The workflow is designed as a sequential build → filter → combine → save p
 ---
 
 ### 2.3 `02b_tsr_approx_distribution.R` — TSR event proxy from WRDS SEC forms
-
+*  As no source is available to reliably extract TSR distribution date, we will use a proxy which is calculated based on available data in wrds and using distribution rules imposed by sec for reporting time period.
 * **Step 1 — Pull TSR-relevant SEC filings using fund CIKs (COMP CIK only).**
   For each share class (`crsp_fundno`), the script takes `comp_cik`, convert it to a clean 10-digit numeric CIK, and queries `wrdssec.wrds_forms` for TSR-relevant forms:
   `N-CSR`, `N-CSRS`, amendments (`/A`), and notices (`NT-NCSR`, `NTFNCSR`).
@@ -158,7 +158,7 @@ The workflow is designed as a sequential build → filter → combine → save p
   The first row after sorting becomes the share class’s TSR event.
 
 * **Step 7 — Convert to month-end and create `post_tsr`.**
-  Because your CRSP panel date `caldt` is **monthly (month-end)**, the event date is converted to month-end:
+  Because CRSP panel date `caldt` is **monthly (month-end)**, the event date is converted to month-end:
 
   * `approx_tsr_dis_monthend = ceiling_date(approx_tsr_dis, "month") - 1`
 
@@ -187,26 +187,56 @@ The workflow is designed as a sequential build → filter → combine → save p
 
 ### 2.4 `03_alphas_market_adjusted_returns.R` — Performance construction
 
-**Purpose**
+### Purpose 
 
-* Update-joins Fama-French factors onto `dt` by month (`caldt`).
-* Builds `exret = mret - rf`.
-* Computes fund flows (if not already computed): `flow` and `flow_l1`.
-* Calculates **rolling alphas** using rolling regressions (via `frollapply` + `lm.fit`):
+This script combines0 the monthly CRSP share-class panel `dt` with factor data and performance measures, without changing the existing column order  (it only appends new variables to the far right), then hands off to Script 04.
 
-  * CAPM alpha: 12/24/36 months
-  * Carhart alpha: 12/24/36 months
-* Computes trailing compounded returns for:
+* **Merge Fama–French factors by month**
 
-  * Market: 12/60/120 months
-  * Fund: 12/60/120 months
-* Computes market-adjusted trailing excess returns:
+  * Joins the monthly FF table onto `dt` using the month-end date `caldt` (i.e., each fund-month row gets the same factor values for that calendar month).
 
-  * `excess_ret_12m`, `excess_ret_60m`, `excess_ret_120m`
-* Preserves original column order and appends new fields to the right.
-* **Auto-runs Script 04**. 
+* **Build excess return**
 
----
+  * Creates `exret = mret − rf` (fund’s monthly return minus the risk-free rate for that month).
+
+* **Compute fund flows (if missing)**
+
+  * If not already present, computes:
+
+    * `flow`: CRSP-style net flow measure using current TNA, lagged TNA, and return.
+    * `flow_l1`: one-month lag of `flow` (within `crsp_fundno`).
+
+* **Estimate rolling alphas via rolling regressions**
+
+  * Runs rolling  time-series regressions within each share class (`crsp_fundno`) using `frollapply` + `lm.fit`.
+  * Outputs  rolling intercepts (alphas) for:
+
+    * **CAPM alpha  (regress `exret` on `mktrf`) over 12 / 24 / 36 months
+    * **Carhart alpha** (regress `exret` on `mktrf, smb, hml, umd`) over 12 / 24 / 36  months
+
+* **Compute trailing compounded returns (long-horizon performance)**
+
+  * Builds trailing compounded returns using rolling compounding for:
+
+    * **Market**: `mkt_ret_12m`, `mkt_ret_60m`, `mkt_ret_120m`
+    * **Fund**: `fund_ret_12m`, `fund_ret_60m`, `fund_ret_120m`
+
+* **Compute market-adjusted trailing returns**
+
+  * Creates market-adjusted (“excess vs market”) trailing performance:
+
+    * `excess_ret_12m  = fund_ret_12m  − mkt_ret_12m`
+    * `excess_ret_60m  = fund_ret_60m  − mkt_ret_60m`
+    * `excess_ret_120m = fund_ret_120m − mkt_ret_120m`
+
+* **Preserve column order**
+
+  * Keeps all original columns in the same positions; any new factor/flow/alpha/return fields are appended at the end.
+
+* **Auto-run Script 04**
+
+  * After building these measures, the script automatically runs `04_controls_and_save.R` to add controls and write the final CSV. 
+
 
 ### 2.5 `04_controls_and_save.R` — Controls + final dataset export
 
@@ -233,7 +263,7 @@ The workflow is designed as a sequential build → filter → combine → save p
 
 **Purpose**
 
-* Builds a compact CSV used for:
+* Builds a compact CSV used for downloading the NCSR filings from the EDGAR:
 
   * manual website searches (TSR presence)
   * EDGAR downloader workflows (CIK-driven)
@@ -248,7 +278,7 @@ The workflow is designed as a sequential build → filter → combine → save p
 
 * `TSR Manual Search List - Equity.csv` 
 
-> Note: `dt_analysis` is assumed by the script but is not created inside Script 05. In practice, `dt_analysis` is typically created as a filtered copy of `dt` (e.g., a chosen sample window or a post-filter dataset) before running Script 05. 
+
 
 ---
 
@@ -284,7 +314,7 @@ Creates two separate CSVs from the final dataset `mf_with_names_2015_2026_equity
 ```text
 AccountingResearch/
 ├─ Scripts/
-│  ├─ 01_data_extraction.R                 # (may also be named "Data Collection.R")
+│  ├─ 01_Data Collection.R                 # (may also be named "Data Collection.R")
 │  ├─ 02_equity_filter.R
 │  ├─ 02b_tsr_approx_distribution.R
 │  ├─ 03_alphas_market_adjusted_returns.R
@@ -292,7 +322,7 @@ AccountingResearch/
 │  ├─ 05_filter_equity_funds.R
 │  └─ 06_Create Samples.R
 │
-├─ R Raw Data/
+├─ R Raw Data/   [Important - Folder link](https://drive.google.com/drive/folders/1yWs9PBoXDkqW1r-EQgwt7rFwvCFhRva3?usp=sharing)
 │  ├─ mf_with_names_2015_2026_equity_perf_controls.csv
 │  ├─ mf_unfiltered_all_final_columns.csv
 │  ├─ filter_drop_summary_2021_2025_with_lipper_match.csv
@@ -300,8 +330,9 @@ AccountingResearch/
 │  ├─ mf_with_names_2015_2026_equity_perf_controls_EVENTWIN_PRE24_POST24_byTSR.csv
 │  └─ mf_with_names_2015_2026_equity_perf_controls_CALWIN_2022_2025_end2025-12-31.csv
 │
-└─ (optional) TSR reports/                # if you run the EDGAR download workflow separately
-```
+└─ (optional) TSR reports/     [Important - Folder link](https://drive.google.com/drive/folders/1h5ojtapR1Is6RI-xLVu1_4eboPaZOPT_)
+
+
 
 ---
 
@@ -355,4 +386,4 @@ AccountingResearch/
 
 ---
 
-If you want, I can also output this as an actual `README.md` file (ready to paste into GitHub), but the content above is already formatted as markdown and should render cleanly.
+
