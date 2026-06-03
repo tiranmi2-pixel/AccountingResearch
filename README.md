@@ -4,7 +4,7 @@ This repository contains the code for my  research on **Tailored Shareholder Rep
 
 The project builds a monthly CRSP mutual fund share-class panel, identifies when each fund first appears to adopt the TSR format, and studies whether investor flows become more sensitive to past performance after TSR adoption. The analysis focuses on U.S. domestic equity mutual funds and compares overall, retail, and institutional investor responses.
 
-The code is written mainly in **R**, with a separate **Python/Google Colab EDGAR downloader and machine-learning classifier** used to obtain the first TSR filing and report dates.
+The code is written mainly in **R**, with a separate **Python EDGAR downloader and machine-learning classifier** used to obtain the first TSR filing and report dates.
 
 ---
 
@@ -40,7 +40,7 @@ Instead, the current workflow uses a separate EDGAR downloader and machine-learn
    R Raw Data/TSR Manual Search List - Equity.csv
    ```
 
-2. That file is used by a separate Python/Google Colab downloader to collect N-CSR and N-CSR/A filings from EDGAR.
+2. That file is used by a separate Python downloader to collect N-CSR and N-CSR/A filings from EDGAR.
 
 3. The downloader saves both:
    - HTML filing files
@@ -82,11 +82,18 @@ post_fund = 1 if caldt >= tsr_filingdate_first_mend
 This means each portfolio has its own TSR adoption month.
 
 ---
-
 ## 3. Repository Structure
+
+The main project folder is now more streamlined. The core R pipeline scripts are stored directly inside the `Scripts/` folder. The deeper regression and descriptive-statistics scripts are stored in `Scripts/Indepth Analysis/`, while the EDGAR downloader and ML-related scripts are stored in `Scripts/Downloader & ML/`.
 
 ```text
 AccountingResearch/
+│
+├─ .git/
+├─ .Rproj.user/
+│
+├─ Distribution Dates/
+│  └─ tsr_first_tsr_dates_by_fund_ML_FIXED.csv
 │
 ├─ Scripts/
 │  ├─ Data Collection.R
@@ -95,39 +102,37 @@ AccountingResearch/
 │  ├─ 04_controls_and_save.R
 │  ├─ 05_filter_list_for_downloader.R
 │  ├─ 06_Create Samples.R
-│  └─ 07_Analysis.R
+│  ├─ 07_Analysis.R
+│  │
+│  ├─ Downloader & ML/
+│  │  ├─ Edgar Downloader.R
+│  │  ├─ ML Training - PDF Files.R
+│  │  ├─ ML training- HTML files.R
+│  │  └─ TSR Detection Using ML.R
+│  │
+│  └─ Indepth Analysis/
+│     ├─ complete_combined_descriptive_statistics_winsorized.R
+│     ├─ Cross Sec Fee- Darendeli.R
+│     ├─ Cross Sec Fee- Darendeli-Combined.R
+│     ├─ Cross Sec Fee- Inflows.R
+│     ├─ Cross Sec Fee- Outflows.R
+│     ├─ Main- Inflows.R
+│     ├─ Main- Outflows.R
+│     ├─ Main-Darendelis Flows.R
+│     ├─ Quartiles- Darendelis Flows.R
+│     ├─ Quartiles- Inflows.R
+│     ├─ Quartiles- Outflows.R
+│     ├─ Terciles- Darendelis Flows.R
+│     ├─ Terciles- Inflows.R
+│     └─ Terciles- Outflows.R
 │
-├─ Descriptive Statistics/
-│  ├─ complete_combined_descriptive_statistics_winsorized.R
-│  ├─ descriptive_statistics_winsorized_complete_pack.xlsx
-│  ├─ missing_table_dt24.csv
-│  └─ missing_table_dt24.xlsx
-│
-├─ Results/
-│  ├─ professor_alpha_capm_12m_dar_tplus1_classFE/
-│  ├─ professor_alpha_capm_12m_inflow_tplus1_classFE/
-│  ├─ professor_alpha_capm_12m_outflow_tplus1_classFE/
-│  ├─ alpha_capm12m_dar_flow_tplus1_classFE_highlow_comparison/
-│  ├─ alpha_capm12m_inflow_tplus1_classFE_highlow_comparison/
-│  └─ alpha_capm12m_outflow_tplus1_classFE_highlow_comparison/
-│
-├─ R Raw Data/
-│  ├─ mf_with_names_equity_perf_controls_2022_2025.csv
-│  ├─ Full_equity_filtered_data.csv
-│  ├─ Equity_filtered_24m_pre_post_by_tsr_filingdate_first.csv
-│  ├─ TSR Manual Search List - Equity.csv
-│  └─ filter_drop_summary_2022_2025_with_lipper_match.csv
-│
-├─ Distrbution Dates/
-│  └─ tsr_first_tsr_dates_by_fund_ML_FIXED.csv
-│
+├─ .gitignore
+├─ .Rhistory
+├─ AccountingResearch.Rproj
 └─ README.md
 ```
 
-> **Note:** The folder name `Distrbution Dates` is intentionally written here exactly as used in the scripts.
-
----
-
+> **Note:** The files inside `Scripts/Downloader & ML/` are Python-based workflow scripts saved with `.R` extensions only so they can be kept with the rest of the project scripts. They are included for transparency about how EDGAR filings were downloaded, how the TSR classifier was trained, and how first TSR dates were identified.
 ## 4. Main R Pipeline
 
 The main pipeline is designed to run sequentially. Each script creates or enriches the main object `dt`, which is stored in memory as a `data.table`.
@@ -805,7 +810,7 @@ The pipeline pauses after creating the downloader list so that the separate EDGA
 
 ### Step 2: Run the Separate EDGAR Downloader and ML Classifier
 
-Use the following file as the input to the Python/Google Colab downloader:
+Use the following file as the input to the Python downloader:
 
 ```text
 R Raw Data/TSR Manual Search List - Equity.csv
@@ -935,7 +940,7 @@ scales
 
 WRDS access is required for the data extraction scripts.
 
-The separate downloader and ML classifier are run outside the main R pipeline, preferably in Google Colab.
+The separate downloader and ML classifier are run outside the main R pipeline, preferably in Ubuntu VPS.
 
 ---
 
