@@ -1,392 +1,996 @@
 # AccountingResearch
-The repository contains the R code for the TSR research.
 
+This repository contains the code for my  research on **Tailored Shareholder Reports (TSR)** and mutual fund investor behavior.
 
-# TSR Data Collection (CRSP Mutual Funds + WRDS SEC Forms)
+The project builds a monthly CRSP mutual fund share-class panel, identifies when each fund first appears to adopt the TSR format, and studies whether investor flows become more sensitive to past performance after TSR adoption. The analysis focuses on U.S. domestic equity mutual funds and compares overall, retail, and institutional investor responses.
 
-## Part 01: Project objectives and overall research approach
-
-### 1.1 Project background
-
-This repository contains an end-to-end R workflow that constructs a monthly CRSP mutual-fund share-class panel, combine it with fund identifiers and contact information, filters to U.S. domestic equity mutual funds, and then attaches TSR-distrbution date (Estimated value) from SEC filing metadata. The workflow also computes performance measures such as CAPM/Carhart rolling alphas &t martket adjusted trailing returns and control variables required for the study (e.g., lagged size, age, fees, turnover, volatility, loads).
-
-
-### 1.2 Overall research approach (how the pipeline works)
-
-The workflow is designed as a sequential build → filter → combine → save process, where each script adds a specific layer of information while preserving column order (identifiers left; newly created variables appended right). The scripts share a common convention: the master dataset is held in memory as **`dt`** (data.table).
-
-**High level flow of the scripts**
-
-1. Build base monthly panel (`dt`) from CRSP and attach mapping/contact/style(investment type, eg : Whether its equity or bond fund)/CIKs
-2. Filter to domestic equity mutual funds (exclude ETFs/ETNs, exclude index funds, keep CRSP ED objective; validate with Lipper EQ when available)
-3. Attach TSR event proxy from WRDS SEC forms and create `post_tsr` indicator - Event proxy is the first month end date when a fund is inferred to have distributed the TSR report after the mandatory cut of July 2024.
-4. Compute alphas, trailing returns, and market-adjusted performance
-5. Add controls and save the final CSV
-6. Create a manual TSR search list for EDGAR/website validation - This file is later used with google colabotory python script to download all NCSR filings after January 1st 2021. The downloader downloads PDF rendered version of the filing and HTML version which can be later used for xbrl related analysis if required. 
-7. Create analysis samples (event window and fixed calendar window) _ Filtered data collection is saved as two seperate CVs, one contains the details of 24 months pre and post the first TSR distrubiton date of each fund. Second file consists of data sample covering 48 months from 2022 January to December 2025.
+The code is written mainly in **R**, with a separate **Python/Google Colab EDGAR downloader and machine-learning classifier** used to obtain the first TSR filing and report dates.
 
 ---
 
-## Part 02: Code map (what each R file does)
+## 1. Project Overview
 
-### 2.1 `01_data_extraction.R` (a.k.a. “Data Collection.R”) — Base dataset construction
+The main research question is whether the introduction of Tailored Shareholder Reports made mutual fund investors more responsive to fund performance.
 
-**Purpose**
+The basic logic of the project is:
 
-* Connects to WRDS with an **auto-reconnect `dbGetQuery()` wrapper** to reduce failures in long runs.
-* Pulls CRSP monthly fund data (`monthly_tna_ret_nav`) and converts returns to decimals if needed.
-* Pulls Fama-French monthly factors and builds a market index series (`mkt_idx_df`).
-* Joins CRSP `portnomap` and `contact_info` using their valid date windows.
-* Pulls style (investment type) fields from `fund_summary2` (e.g., `lipper_asset_cd`, `policy`) using a rolling “as-of” join.
-* Attaches CIK fields (`comp_cik`, `series_cik`, `contract_cik`) via `crsp_cik_map` and creates `cik_best`.
-* Saves key objects into memory (`dt`, `ff`, `mkt_idx_df`, `proj_root`, `wrds`) and **auto-runs Script 02**. 
+1. Build a CRSP mutual fund share-class-month panel.
+2. Filter the sample to U.S. domestic equity mutual funds.
+3. Download N-CSR and N-CSR/A filings separately from EDGAR.
+4. Use a machine-learning classifier to identify TSR-format filings.
+5. Attach the first TSR filing and report date to each CRSP portfolio.
+6. Create a fund-specific pre/post TSR event window.
+7. Estimate whether flow-performance sensitivity changes after TSR adoption.
 
-**Data stored in memory**
-
-* `dt`: base monthly panel
-* `ff`: monthly FF factors (decimal)
-* `mkt_idx_df`: market return series by month (`mkt_ret = mktrf + rf`)
-* `proj_root`, `wrds` 
+The final empirical sample is a share-class-month panel. TSR adoption is measured at the **portfolio level** using `crsp_portno`, while flows and performance are measured at the **share-class level** using `crsp_fundno`.
 
 ---
 
-### 2.2 `02_equity_filter.R` — Equity mutual fund filtering + style attach (as-of)
+## 2. Important Note on TSR Dates
 
-**Purpose**
+The current R pipeline does **not** rely only on WRDS SEC form metadata to infer TSR dates.
 
-* Selects the crsp_q_mutualfunds.fund_summary2 and joins `crsp_obj_cd`, `policy`, and `lipper_asset_cd` using an as-of rolling join.
-* Then applies a structured equity filter:
+Instead, the current workflow uses a separate EDGAR downloader and machine-learning process.
 
-  1. Drop ETFs/ETNs using `et_flag` (F/N)
-  2. Drop index funds using `index_fund_flag` (B/D/E)
-  3. Keep domestic equity using CRSP objective code `ED**`
-  4. Validate with Lipper: keep `EQ` when present; if missing, keep CRSP classification 
+### 2.1 TSR-Date Workflow
 
-**Additional outputs created by this script**
+1. `05_filter_list_for_downloader.R` creates the downloader input file:
 
-* An **info-only** filter diagnostic file for 2021–2025:
+   ```text
+   R Raw Data/TSR Manual Search List - Equity.csv
+   ```
 
-  * `filter_drop_summary_2021_2025_with_lipper_match.csv`
-    This tracks how many unique funds are removed at each filter step and how often Lipper confirms/mismatches CRSP equity classification. 
+2. That file is used by a separate Python/Google Colab downloader to collect N-CSR and N-CSR/A filings from EDGAR.
 
-**Unfiltered “snapshot” (important)**
+3. The downloader saves both:
+   - HTML filing files
+   - rendered PDF versions of the filings
 
-*The script also creates an unfiltered snapshot of the data (dt_unfilt). It then runs the same enrichment steps (02b → 03 → 04) on this snapshot and saves:
+4. A machine-learning classifier is then used to detect whether a filing is in TSR format.
 
-*mf_unfiltered_all_final_columns.csv
+5. The ML output is saved as:
 
-*This file contains the full CRSP mutual-fund universe (i.e., no equity/ETF/index filtering), but it still includes all derived variables—TSR event fields, rolling alphas, trailing returns, and control variables—so it matches the structure of the main analysis dataset.
+   ```text
+   Distrbution Dates/tsr_first_tsr_dates_by_fund_ML_FIXED.csv
+   ```
 
-**Finalizing**
+6. `05_filter_list_for_downloader.R` reads the ML output and attaches the first TSR dates back to the full R dataset.
 
-* After filtering the exisitng data using the criterias explained above, it auto-runs the below two scripts to obtain estimated TSR distribution date and derive alphas and market adjusted returns:
+### 2.2 TSR-Date Variables
 
-  * `02b_tsr_approx_distribution.R`
-  * `03_alphas_market_adjusted_returns.R` 
+The ML output is attached to the R dataset using the following fields:
 
----
+```text
+tsr_filingdate_first
+tsr_reportdate_first
+tsr_cik_first
+tsr_accession_first
+```
 
-### 2.3 `02b_tsr_approx_distribution.R` — TSR event proxy from WRDS SEC forms
-*  As no source is available to reliably extract TSR distribution date, we will use a proxy which is calculated based on available data in wrds and using distribution rules imposed by sec for reporting time period.
-* **Step 1 — Pull TSR-relevant SEC filings using fund CIKs (COMP CIK only).**
-  For each share class (`crsp_fundno`), the script takes `comp_cik`, convert it to a clean 10-digit numeric CIK, and queries `wrdssec.wrds_forms` for TSR-relevant forms:
-  `N-CSR`, `N-CSRS`, amendments (`/A`), and notices (`NT-NCSR`, `NTFNCSR`).
+The main event date used in the analysis is the first TSR filing date, converted to month-end:
 
-* **Step 2 — Define the filing dates used in the timing logic.**
-  For each matched filing row:
+```text
+tsr_filingdate_first_mend
+```
 
-  * `fdate` = SEC filing date (EDGAR filing date)
-  * `rdate_use` = reporting period end date used for timing
+The fund-specific post indicator is then defined as:
 
-    * if `rdate` is missing, the script falls back to `secpdate` as the period-end proxy.
+```text
+post_fund = 1 if caldt >= tsr_filingdate_first_mend
+```
 
-* **Step 3 — Construct a feasible window for “distribution date” (because true distribution is unobserved).**
-  The script builds an approximate distribution window using two assumptions:
-
-  **(A) Distribution must occur after the report period ends**
-
-  * Lower bound:
-    `dist_lb = rdate_use + 1`
-
-  **(B) Distribution must occur no later than the earlier of filing date and 60 days after period end**
-
-  * Upper bound:
-    `dist_ub = min(fdate, rdate_use + 60)`
-
-  **(C) “Filed within 10 days of distribution” assumption (tightens the lower bound)**
-
-  * Lower bound:
-    `dist_lb_feasible = max(dist_lb, fdate - 10)`
-  * Upper bound stays:
-    `dist_ub_feasible = dist_ub`
-
-* **Step 4 — Flag questionable timing (but keep filings).**
-  The script keeps filings even if assumptions conflict, but flags them:
-
-  * `tsr_flag_pre_tsr_period = 1` if `rdate_use <= 2024-07-31`
-  * `tsr_flag_inconsistent_window = 1` if `dist_lb_feasible > dist_ub_feasible`
-  * `tsr_flag_filed_too_late_for_60 = 1` if `fdate > rdate_use + 60 + 10` Eg: Late filing
-
-* **Step 5 — Choose the approximate distribution date per filing (`approx_tsr_dis`).**
-  This is the key event proxy calculation:
-
-  **If the feasible window is consistent** (`dist_lb_feasible ≤ dist_ub_feasible`):
-
-  * the script sets
-    `approx_tsr_dis = dist_ub_feasible`
-     meaning pick the latest feasible date** (usually the filing date unless it exceeds rdate+60).
-
-  **If the feasible window is inconsistent**:
-
-  * the script falls back to
-    `approx_tsr_dis = max(rdate_use + 1, fdate - 10)`
-   Meaning: best-effort estimate that respects “after period end” and “~10 days before filing”.
-
-  Then, because `KEEP_ONLY_POST_DIST = TRUE`, it drops filings where:
-
-  * `approx_tsr_dis <= 2024-07-31`
-
-* **Step 6 — Pick the “first TSR-era event” per share class.**
-  After mapping filings back from `cik → crsp_fundno`, the script sorts and selects one filing per `crsp_fundno`:
-
-  Sorting priority:
-
-  1. **earliest `approx_tsr_dis`** (defines the first event)
-  2. earlier `fdate`
-  3. prefer non-amendments over amendments (tie-break)
-
-  The first row after sorting becomes the share class’s TSR event.
-
-* **Step 7 — Convert to month-end and create `post_tsr`.**
-  Because CRSP panel date `caldt` is **monthly (month-end)**, the event date is converted to month-end:
-
-  * `approx_tsr_dis_monthend = ceiling_date(approx_tsr_dis, "month") - 1`
-
-  Then the post indicator is defined as:
-
-  * `post_tsr = 1` if `caldt >= approx_tsr_dis_monthend` (and the event exists), else `0`
-
-  Interpretation:
-
-  * Months before the event month-end are **pre-TSR**
-  * The event month-end and later months are **post-TSR**
-
-  * `approx_tsr_dis_monthend`
-  * `post_tsr` = 1 once `caldt >= approx_tsr_dis_monthend` 
-
-**Key columns appended to `dt`**
-
-* `approx_tsr_dis`, `approx_tsr_dis_monthend`
-* `tsr_form_first`, `tsr_accession_first`
-* `tsr_fdate_first`, `tsr_rdate_first`, `tsr_rdate_raw_first`
-* `tsr_cik_used`, `tsr_cik_type_used`
-* Quality flags: `tsr_flag_pre_tsr_period`, `tsr_flag_inconsistent_window`, `tsr_flag_filed_too_late_for_60`
-* `post_tsr` 
+This means each portfolio has its own TSR adoption month.
 
 ---
 
-### 2.4 `03_alphas_market_adjusted_returns.R` — Performance construction
-
-### Purpose 
-
-This script combines0 the monthly CRSP share-class panel `dt` with factor data and performance measures, without changing the existing column order  (it only appends new variables to the far right), then hands off to Script 04.
-
-* **Merge Fama–French factors by month**
-
-  * Joins the monthly FF table onto `dt` using the month-end date `caldt` (i.e., each fund-month row gets the same factor values for that calendar month).
-
-* **Build excess return**
-
-  * Creates `exret = mret − rf` (fund’s monthly return minus the risk-free rate for that month).
-
-* **Compute fund flows (if missing)**
-
-  * If not already present, computes:
-
-    * `flow`: CRSP-style net flow measure using current TNA, lagged TNA, and return.
-    * `flow_l1`: one-month lag of `flow` (within `crsp_fundno`).
-
-* **Estimate rolling alphas via rolling regressions**
-
-  * Runs rolling  time-series regressions within each share class (`crsp_fundno`) using `frollapply` + `lm.fit`.
-  * Outputs  rolling intercepts (alphas) for:
-
-    * **CAPM alpha  (regress `exret` on `mktrf`) over 12 / 24 / 36 months
-    * **Carhart alpha** (regress `exret` on `mktrf, smb, hml, umd`) over 12 / 24 / 36  months
-
-* **Compute trailing compounded returns (long-horizon performance)**
-
-  * Builds trailing compounded returns using rolling compounding for:
-
-    * **Market**: `mkt_ret_12m`, `mkt_ret_60m`, `mkt_ret_120m`
-    * **Fund**: `fund_ret_12m`, `fund_ret_60m`, `fund_ret_120m`
-
-* **Compute market-adjusted trailing returns**
-
-  * Creates market-adjusted (“excess vs market”) trailing performance:
-
-    * `excess_ret_12m  = fund_ret_12m  − mkt_ret_12m`
-    * `excess_ret_60m  = fund_ret_60m  − mkt_ret_60m`
-    * `excess_ret_120m = fund_ret_120m − mkt_ret_120m`
-
-* **Preserve column order**
-
-  * Keeps all original columns in the same positions; any new factor/flow/alpha/return fields are appended at the end.
-
-* **Auto-run Script 04**
-
-  * After building these measures, the script automatically runs `04_controls_and_save.R` to add controls and write the final CSV. 
-
-
-### 2.5 `04_controls_and_save.R` — Controls + final dataset export
-
-**Purpose**
-
-* Adds standard regression controls (constructed from the panel and from CRSP fund summary tables), while preserving existing column order:
-
-  * Age (and lag): `age_years`, `age_years_l1`
-  * Size (and lag): `log_tna`, `log_tna_l1`
-  * Flows (and lag): `flow`, `flow_l1` (if missing)
-  * Family size (lagged): `family_tna_l1`, `log_familytna_l1` by `mgmt_cd × caldt`
-  * Volatility: `vol_12m`, `vol_12m_l1`
-  * Fees/turnover (as-of from `crsp.fund_summary2` or `crsp.fund_summary`): `exp_ratio`, `turn_ratio` and lags
-  * Optional loads (if tables exist in `crspq`): `front_load`, `rear_load` and lags 
-
-**Final output produced here**
-
-* `mf_with_names_2015_2026_equity_perf_controls.csv`
-  This is the main “analysis-ready” file containing identifiers, TSR event fields, performance metrics, and controls. 
-
----
-
-### 2.6 `05_filter_equity_funds.R` — TSR manual search list (for validation + downloader input)
-
-**Purpose**
-
-* Builds a compact CSV used for downloading the NCSR filings from the EDGAR:
-
-  * manual website searches (TSR presence)
-  * EDGAR downloader workflows (CIK-driven)
-* Expects `dt_analysis` to exist in memory and selects a subset of columns (IDs, CIKs, website fields, retail/inst flags).
-* Chooses **one representative row per portfolio** (`crsp_portno`) with priority:
-
-  1. has website
-  2. retail-only share class
-  3. most recent `caldt` 
-
-**Output**
-
-* `TSR Manual Search List - Equity.csv` 
-
-
-
----
-
-### 2.7 `06_Create Samples.R` — Analysis sample construction (two alternative windows)
-
-**Purpose**
-Creates two separate CSVs from the final dataset `mf_with_names_2015_2026_equity_perf_controls.csv`:
-
-**(A) Event-window dataset (fund-specific TSR timing)**
-
-* Uses a TSR event date column (first found among):
-
-  * `approx_tsr_dis_monthend` (preferred)
-  * `approx_tsr_dis` (converted to month-end)
-  * fallback names if renamed
-* Keeps observations within **±24 months** around the TSR event month-end. 
-
-**(B) Calendar-window dataset (fixed time window)**
-
-* Keeps observations between **2022-01-01 and 2025-12-31** (inclusive), based on the monthly panel date `caldt`. 
-
-**Outputs**
-
-* `mf_with_names_2015_2026_equity_perf_controls_EVENTWIN_PRE24_POST24_byTSR.csv`
-* `mf_with_names_2015_2026_equity_perf_controls_CALWIN_2022_2025_end2025-12-31.csv` 
-
----
-
-## Part 03: Project file map (recommended folder tree)
-
-
+## 3. Repository Structure
 
 ```text
 AccountingResearch/
+│
 ├─ Scripts/
-│  ├─ 01_Data Collection.R                 # (may also be named "Data Collection.R")
+│  ├─ Data Collection.R
 │  ├─ 02_equity_filter.R
-│  ├─ 02b_tsr_approx_distribution.R
 │  ├─ 03_alphas_market_adjusted_returns.R
 │  ├─ 04_controls_and_save.R
-│  ├─ 05_filter_equity_funds.R
-│  └─ 06_Create Samples.R
+│  ├─ 05_filter_list_for_downloader.R
+│  ├─ 06_Create Samples.R
+│  └─ 07_Analysis.R
 │
-├─ R Raw Data/   
-│  ├─ mf_with_names_2015_2026_equity_perf_controls.csv
-│  ├─ mf_unfiltered_all_final_columns.csv
-│  ├─ filter_drop_summary_2021_2025_with_lipper_match.csv
+├─ Descriptive Statistics/
+│  ├─ complete_combined_descriptive_statistics_winsorized.R
+│  ├─ descriptive_statistics_winsorized_complete_pack.xlsx
+│  ├─ missing_table_dt24.csv
+│  └─ missing_table_dt24.xlsx
+│
+├─ Results/
+│  ├─ professor_alpha_capm_12m_dar_tplus1_classFE/
+│  ├─ professor_alpha_capm_12m_inflow_tplus1_classFE/
+│  ├─ professor_alpha_capm_12m_outflow_tplus1_classFE/
+│  ├─ alpha_capm12m_dar_flow_tplus1_classFE_highlow_comparison/
+│  ├─ alpha_capm12m_inflow_tplus1_classFE_highlow_comparison/
+│  └─ alpha_capm12m_outflow_tplus1_classFE_highlow_comparison/
+│
+├─ R Raw Data/
+│  ├─ mf_with_names_equity_perf_controls_2022_2025.csv
+│  ├─ Full_equity_filtered_data.csv
+│  ├─ Equity_filtered_24m_pre_post_by_tsr_filingdate_first.csv
 │  ├─ TSR Manual Search List - Equity.csv
-│  ├─ mf_with_names_2015_2026_equity_perf_controls_EVENTWIN_PRE24_POST24_byTSR.csv
-│  └─ mf_with_names_2015_2026_equity_perf_controls_CALWIN_2022_2025_end2025-12-31.csv
+│  └─ filter_drop_summary_2022_2025_with_lipper_match.csv
 │
-└─ (optional) TSR reports/     
+├─ Distrbution Dates/
+│  └─ tsr_first_tsr_dates_by_fund_ML_FIXED.csv
+│
+└─ README.md
 ```
-- [Folder link to download outputs from the R code](https://drive.google.com/drive/folders/1yWs9PBoXDkqW1r-EQgwt7rFwvCFhRva3?usp=sharing)
-- [Folder link to view downloaded NCSR reports](https://drive.google.com/drive/folders/1h5ojtapR1Is6RI-xLVu1_4eboPaZOPT_)
 
-
+> **Note:** The folder name `Distrbution Dates` is intentionally written here exactly as used in the scripts.
 
 ---
 
-## Part 04: Output files and what they represent
+## 4. Main R Pipeline
 
-### 4.1 Main dataset outputs
-
-1. **`mf_with_names_2015_2026_equity_perf_controls.csv`**
-
-   * The primary dataset: equity-filtered CRSP mutual funds with TSR event fields, performance measures, and controls. 
-
-2. **`mf_unfiltered_all_final_columns.csv`**
-
-   * A “full universe” version (no equity/ETF/index filters), but enriched with the same TSR/performance/control columns by temporarily running 02b/03/04 on an unfiltered snapshot.
-
-### 4.2 Diagnostics and validation outputs
-
-3. **`filter_drop_summary_2021_2025_with_lipper_match.csv`**
-
-   * A stepwise breakdown showing how many funds are removed by each filter rule, plus a Lipper-vs-CRSP equity agreement check (computed for interpretability, not for altering the main dataset directly). 
-
-4. **`TSR Manual Search List - Equity.csv`**
-
-   * A portfolio-level list (one row per `crsp_portno`) designed for manual TSR searching and EDGAR downloader inputs, prioritized toward share classes with websites and retail availability. 
-
-### 4.3 Analysis sample outputs (two alternative designs)
-
-5. **`...EVENTWIN_PRE24_POST24_byTSR.csv`**
-
-   * A fund-specific event window sample using the TSR month-end proxy (preferred: `approx_tsr_dis_monthend`) and keeping ±24 months around the event. 
-
-6. **`...CALWIN_2022_2025_end2025-12-31.csv`**
-
-   * A fixed calendar window sample (2022–2025 inclusive), filtered purely by `caldt`. 
+The main pipeline is designed to run sequentially. Each script creates or enriches the main object `dt`, which is stored in memory as a `data.table`.
 
 ---
 
-## Part 05: How to run (recommended sequence)
+### 4.1 `Data Collection.R`
 
-1. Open RStudio with working directory at the repo root.
-2. Run:
+This script starts the full WRDS data construction process.
 
-   * `Scripts/01_data_extraction.R`
-     This will auto-run 02 → 02b → 03 → 04 and produce the main CSV.
-3. (Optional) Create `dt_analysis` (your chosen analysis subset) and run:
+It:
 
-   * `Scripts/05_filter_equity_funds.R` to generate the manual search list. 
-4. Run:
+- connects to WRDS using an auto-reconnect wrapper;
+- pulls CRSP monthly fund return, NAV, and TNA data from `crsp.monthly_tna_ret_nav`;
+- pulls Fama-French monthly factors from `ff.factors_monthly`;
+- creates the market return series `mkt_idx_df`;
+- attaches CRSP portfolio mappings from `crsp.portnomap`;
+- attaches contact information from `crsp.contact_info`;
+- attaches style fields such as `lipper_asset_cd`, `policy`, and `fiscal_yearend`;
+- attaches CIK information from `crsp_q_mutualfunds.crsp_cik_map`;
+- attaches class-level expense ratios from `crsp_q_mutualfunds.fund_fees`;
+- creates the core object `dt`;
+- auto-runs `02_equity_filter.R`.
 
-   * `Scripts/06_Create Samples.R` to generate the two analysis CSVs. 
+The base CRSP pull covers:
+
+```text
+2005-01-01 to 2026-12-31
+```
+
+The current workflow sets:
+
+```r
+RUN_TSR_DATES <- FALSE
+```
+
+This matters because TSR dates are now obtained using the separate downloader and ML classifier, not the older WRDS-only approximate-distribution-date logic.
 
 ---
 
+### 4.2 `02_equity_filter.R`
 
+This script filters the CRSP mutual fund universe to the main domestic equity sample.
+
+It:
+
+- attaches CRSP objective code and Lipper asset code using an as-of style join;
+- removes ETFs and ETNs;
+- removes index funds;
+- keeps domestic equity funds using CRSP objective codes beginning with `ED`;
+- uses Lipper equity classification as a validation layer;
+- saves an equity-filter diagnostic table.
+
+Main diagnostic output:
+
+```text
+R Raw Data/filter_drop_summary_2022_2025_with_lipper_match.csv
+```
+
+This diagnostic file is used to understand how many funds are lost at each filtering step. It is an information and validation output, not a regression output.
+
+After filtering, the script auto-runs:
+
+```text
+03_alphas_market_adjusted_returns.R
+```
+
+---
+
+### 4.3 `03_alphas_market_adjusted_returns.R`
+
+This script adds performance and return measures to the equity-filtered panel.
+
+It:
+
+- merges Fama-French factors onto each fund-month;
+- computes monthly excess returns;
+- computes Darendeli-style return-adjusted net flow;
+- creates `flow_l1`;
+- estimates rolling CAPM alphas over 12, 24, and 36 months;
+- estimates rolling Carhart four-factor alphas over 12, 24, and 36 months;
+- computes trailing compounded fund returns over 12, 60, and 120 months;
+- computes trailing market returns over the same windows;
+- computes market-adjusted trailing returns.
+
+Monthly excess return is defined as:
+
+```text
+exret = mret - rf
+```
+
+Darendeli-style return-adjusted net flow is defined as:
+
+```text
+flow = (TNA_t - TNA_{t-1}(1 + R_t)) / (TNA_{t-1}(1 + R_t))
+```
+
+Main performance variables created include:
+
+```text
+alpha_capm_12m
+alpha_capm_24m
+alpha_capm_36m
+alpha_carhart_12m
+alpha_carhart_24m
+alpha_carhart_36m
+fund_ret_12m
+fund_ret_60m
+fund_ret_120m
+excess_ret_12m
+excess_ret_60m
+excess_ret_120m
+```
+
+The script then auto-runs:
+
+```text
+04_controls_and_save.R
+```
+
+---
+
+### 4.4 `04_controls_and_save.R`
+
+This script adds control variables and saves the main 2022-2025 equity panel.
+
+It keeps the original column order and appends new control variables to the right.
+
+Controls created or attached include:
+
+```text
+age_years
+age_years_l1
+log_tna_l1
+mtna_l1
+flow_l1
+family_tna_l1
+log_familytna_l1
+turn_ratio
+turn_ratio_l1
+mgmt_fee
+mgmt_fee_l1
+exp_ratio
+exp_ratio_l1
+```
+
+The script attaches `turn_ratio`, `mgmt_fee`, and `exp_ratio` from:
+
+```text
+crsp_q_mutualfunds.fund_summary2
+```
+
+using a portfolio-level as-of join.
+
+Main output:
+
+```text
+R Raw Data/mf_with_names_equity_perf_controls_2022_2025.csv
+```
+
+This is the main enriched equity-filtered dataset for the 2022-2025 period.
+
+The script then auto-runs:
+
+```text
+05_filter_list_for_downloader.R
+```
+
+---
+
+### 4.5 `05_filter_list_for_downloader.R`
+
+This script connects the R pipeline to the separate EDGAR downloader and ML workflow.
+
+First, it creates a portfolio-level file for EDGAR searching and downloading:
+
+```text
+R Raw Data/TSR Manual Search List - Equity.csv
+```
+
+The file contains one representative row per `crsp_portno`.
+
+The selection prioritizes:
+
+1. stronger CIK coverage;
+2. more recent observations;
+3. website availability;
+4. retail-only share classes when useful for searching.
+
+The key columns include:
+
+```text
+crsp_portno
+crsp_fundno
+ticker
+fund_name
+series_cik
+contract_cik
+comp_cik
+website
+city
+state
+retail_fund
+inst_fund
+caldt
+```
+
+After the downloader and ML classifier are run, the script imports:
+
+```text
+Distrbution Dates/tsr_first_tsr_dates_by_fund_ML_FIXED.csv
+```
+
+It then attaches the first TSR dates to the full `dt` object by `crsp_portno`.
+
+Additional TSR timing and coverage outputs are saved to:
+
+```text
+Descriptive Statistics/
+```
+
+These include:
+
+```text
+TSR_A_coverage_counts_pct.csv
+TSR_B_lag_filing_minus_report_days.csv
+TSR_C_adoption_by_filing_month.csv
+TSR_D_with_vs_missing_characteristics.csv
+```
+
+The script then auto-runs:
+
+```text
+06_Create Samples.R
+```
+
+---
+
+### 4.6 `06_Create Samples.R`
+
+This script saves the final enriched panel and creates the main event-window sample.
+
+It first saves the full enriched equity-filtered panel:
+
+```text
+R Raw Data/Full_equity_filtered_data.csv
+```
+
+It then defines the eligible universe as portfolios observed during:
+
+```text
+2022-01-01 to 2025-12-31
+```
+
+For each eligible portfolio, it creates a fund-specific event window around the first TSR filing month-end:
+
+```text
+24 months before TSR adoption
+24 months after TSR adoption
+```
+
+The main analysis sample is saved as:
+
+```text
+R Raw Data/Equity_filtered_24m_pre_post_by_tsr_filingdate_first.csv
+```
+
+The script also keeps the event-window sample in memory as:
+
+```text
+dt_24
+```
+
+This object is used by the descriptive statistics and regression scripts.
+
+---
+
+### 4.7 `07_Analysis.R`
+
+This script creates a missingness diagnostic table for `dt_24`.
+
+It checks key variables by group:
+
+```text
+id/core
+dependent variables
+independent variables
+controls
+tsr_dates
+```
+
+Main outputs:
+
+```text
+Descriptive Statistics/missing_table_dt24.csv
+Descriptive Statistics/missing_table_dt24.xlsx
+```
+
+---
+
+## 5. Descriptive Statistics
+
+The main descriptive-statistics script is:
+
+```text
+complete_combined_descriptive_statistics_winsorized.R
+```
+
+This script assumes that `dt_24` already exists in memory.
+
+It creates a local analysis copy, so it does **not** overwrite `dt_24`.
+
+The script:
+
+- reconstructs the descriptive helper variables;
+- computes Darendeli-style return-adjusted flow for descriptive reporting;
+- winsorizes continuous variables at the 1st and 99th percentiles;
+- creates a full Excel workbook;
+- exports separate CSV and PNG files with clear names;
+- adds TSR timing figures and event-window coverage diagnostics.
+
+Main workbook output:
+
+```text
+Descriptive Statistics/descriptive_statistics_winsorized_complete_pack.xlsx
+```
+
+Workbook sheets include:
+
+```text
+01_Core_Descriptives
+02_PrePost_Class
+03_PrePost_N_Mean_Median
+04_Class_Structure
+05_TSR_Timing_Summary
+06_TSR_Adoption_Monthly
+07_TSR_Adoption_Figure
+08_Pre_Retail_vs_Inst
+09_Manager_Concentration
+10_Top10_Managers
+11_Quartile_Cutoffs
+12_Fee_Quartile_Composition
+13_Window_Coverage_Counts
+14_Window_Heatmap_Table
+15_Window_Heatmap_Figure
+16_Window_Coverage_Bar
+```
+
+The most important point is that the descriptive tables are produced from a winsorized copy of the analysis sample, not from the raw un-winsorized data.
+
+---
+
+## 6. Main Regression Design
+
+The main regressions study whether performance-flow sensitivity changes after TSR adoption.
+
+The preferred performance measure in the current professor tables is:
+
+```text
+alpha_capm_12m
+```
+
+The current regression scripts generally use:
+
+```text
+Performance variable = alpha_capm_12m at t
+Dependent variable   = flow, inflow, or outflow at t+1
+```
+
+The post indicator is fund-specific:
+
+```text
+post_fund = 1 if caldt >= first TSR filing month-end
+```
+
+The main regression structure is:
+
+```text
+Flow_{i,t+1} = β1 Performance_{i,t}
+             + β2 Post_{p,t}
+             + β3 Performance_{i,t} × Post_{p,t}
+             + Controls
+             + Class fixed effects
+             + Year-month fixed effects
+             + Error
+```
+
+where:
+
+- `i` is the share class;
+- `p` is the portfolio;
+- class fixed effects are based on `crsp_fundno`;
+- year-month fixed effects are based on `ym`;
+- standard errors are clustered by `crsp_portno`.
+
+The key coefficient is:
+
+```text
+Performance × Post
+```
+
+A positive coefficient means that flow-performance sensitivity increased after TSR adoption.
+
+---
+
+## 7. Main Regression Scripts
+
+### 7.1 Net Flow
+
+```text
+Main-Darendelis Flows.R
+```
+
+This script estimates the main professor table using Darendeli-style net flow at `t+1`.
+
+It produces three displayed model families:
+
+```text
+Combined classes
+Model 1 - Retail
+Model 1 - Institutional
+```
+
+The dependent variable is:
+
+```text
+Darendeli flow at t+1
+```
+
+The performance variable is:
+
+```text
+alpha_capm_12m at t
+```
+
+The script creates both:
+
+```text
+without_winsorization
+with_winsorization
+```
+
+outputs.
+
+Main result folder:
+
+```text
+Results/professor_alpha_capm_12m_dar_tplus1_classFE/
+```
+
+---
+
+### 7.2 Inflows
+
+```text
+Main- Inflows.R
+```
+
+This script estimates the same main structure, but the dependent variable is positive new money only:
+
+```text
+inflow at t+1
+```
+
+Inflow is created as the positive part of Darendeli flow.
+
+Main result folder:
+
+```text
+Results/professor_alpha_capm_12m_inflow_tplus1_classFE/
+```
+
+---
+
+### 7.3 Outflows
+
+```text
+Main- Outflows.R
+```
+
+This script estimates the same main structure, but the dependent variable is withdrawals only:
+
+```text
+outflow at t+1
+```
+
+Outflow is created as the negative part of Darendeli flow, expressed as a positive withdrawal measure.
+
+Main result folder:
+
+```text
+Results/professor_alpha_capm_12m_outflow_tplus1_classFE/
+```
+
+---
+
+## 8. Fee-Based Analyses
+
+The project also tests whether TSR effects differ between high-fee and low-fee funds.
+
+The fee grouping is based on average pre-TSR expense ratio. In the high-vs-low scripts, each share class receives a permanent fee group based on its pre-TSR average expense ratio.
+
+---
+
+### 8.1 High-Fee vs Low-Fee Combined Tables
+
+These scripts create one six-column professor table:
+
+```text
+High-fee Combined
+Low-fee Combined
+High-fee Retail
+Low-fee Retail
+High-fee Institutional
+Low-fee Institutional
+```
+
+Scripts:
+
+```text
+Cross Sec Fee- Darendeli-Combined.R
+Cross Sec Fee- Inflows.R
+Cross Sec Fee- Outflows.R
+```
+
+Main result folders:
+
+```text
+Results/alpha_capm12m_dar_flow_tplus1_classFE_highlow_comparison/
+Results/alpha_capm12m_inflow_tplus1_classFE_highlow_comparison/
+Results/alpha_capm12m_outflow_tplus1_classFE_highlow_comparison/
+```
+
+These scripts also add high-vs-low coefficient comparison rows using:
+
+```text
+z = (Beta_high - Beta_low) / sqrt(SE_high^2 + SE_low^2)
+```
+
+---
+
+### 8.2 Tercile and Quartile Fee Analyses
+
+Additional scripts split funds by fee terciles or quartiles.
+
+Tercile scripts:
+
+```text
+Terciles- Darendelis Flows.R
+Terciles- Inflows.R
+Terciles- Outflows.R
+```
+
+Quartile script:
+
+```text
+Quartiles- Darendelis Flows.R
+```
+
+These scripts keep the same broad structure:
+
+- dependent variable measured at `t+1`;
+- performance measured at `t`;
+- class and year-month fixed effects;
+- clustering by `crsp_portno`;
+- t-statistics shown in parentheses;
+- outputs created with and without winsorization.
+
+---
+
+## 9. Key Variables
+
+### 9.1 Identifiers
+
+| Variable | Description |
+|---|---|
+| `crsp_fundno` | Share-class identifier |
+| `crsp_portno` | Portfolio identifier |
+| `caldt` | Month-end date |
+| `ym` | Year-month fixed effect |
+| `fund_name` | Fund name |
+| `ticker` | Ticker |
+| `retail_fund` | CRSP retail flag |
+| `inst_fund` | CRSP institutional flag |
+
+### 9.2 TSR Dates
+
+| Variable | Description |
+|---|---|
+| `tsr_filingdate_first` | First TSR filing date from ML output |
+| `tsr_reportdate_first` | First TSR report date from ML output |
+| `tsr_filingdate_first_mend` | First TSR filing date converted to month-end |
+| `post_fund` | Fund-specific post-TSR indicator |
+
+### 9.3 Flow Variables
+
+| Variable | Description |
+|---|---|
+| `flow` | Darendeli-style return-adjusted net flow |
+| `flow_l1` | Lagged flow |
+| `flow_tp1` | Darendeli flow at `t+1` |
+| `inflow_tp1` | Positive inflow at `t+1` |
+| `outflow_tp1` | Positive withdrawal/outflow at `t+1` |
+
+### 9.4 Performance Variables
+
+```text
+alpha_capm_12m
+alpha_capm_24m
+alpha_capm_36m
+alpha_carhart_12m
+alpha_carhart_24m
+alpha_carhart_36m
+fund_ret_12m
+fund_ret_60m
+fund_ret_120m
+excess_ret_12m
+excess_ret_60m
+excess_ret_120m
+```
+
+### 9.5 Controls
+
+```text
+age_years_l1
+log_tna_l1
+flow_l1
+log_familytna_l1
+turn_ratio_l1
+mgmt_fee_l1
+exp_ratio_l1
+```
+
+Some regression scripts create contemporaneous local controls inside the script, such as:
+
+```text
+age_years_t
+log_tna_t
+flow_dar_t
+log_familytna_t
+turn_ratio_t
+mgmt_fee_t
+exp_ratio_t
+```
+
+These local variables are used only inside those scripts and do not overwrite the saved pipeline data.
+
+---
+
+## 10. How to Run the Project
+
+### Step 1: Run the Main R Pipeline
+
+From the `Scripts/` folder, run:
+
+```r
+source("Data Collection.R")
+```
+
+This starts the sequential pipeline:
+
+```text
+Data Collection.R
+→ 02_equity_filter.R
+→ 03_alphas_market_adjusted_returns.R
+→ 04_controls_and_save.R
+→ 05_filter_list_for_downloader.R
+→ 06_Create Samples.R
+→ 07_Analysis.R
+```
+
+The pipeline pauses after creating the downloader list so that the separate EDGAR downloader and ML classifier can be run.
+
+---
+
+### Step 2: Run the Separate EDGAR Downloader and ML Classifier
+
+Use the following file as the input to the Python/Google Colab downloader:
+
+```text
+R Raw Data/TSR Manual Search List - Equity.csv
+```
+
+The downloader and ML process should produce:
+
+```text
+Distrbution Dates/tsr_first_tsr_dates_by_fund_ML_FIXED.csv
+```
+
+After this file is available, continue the R pipeline so the first TSR dates can be attached to `dt`.
+
+---
+
+### Step 3: Create the Final Event-Window Sample
+
+The event-window sample is created by:
+
+```text
+06_Create Samples.R
+```
+
+Main output:
+
+```text
+R Raw Data/Equity_filtered_24m_pre_post_by_tsr_filingdate_first.csv
+```
+
+The same object is kept in memory as:
+
+```text
+dt_24
+```
+
+---
+
+### Step 4: Run Descriptive Statistics
+
+After `dt_24` exists, run:
+
+```r
+source("complete_combined_descriptive_statistics_winsorized.R")
+```
+
+Main output:
+
+```text
+Descriptive Statistics/descriptive_statistics_winsorized_complete_pack.xlsx
+```
+
+---
+
+### Step 5: Run Regression Tables
+
+Main net-flow regression:
+
+```r
+source("Main-Darendelis Flows.R")
+```
+
+Main inflow regression:
+
+```r
+source("Main- Inflows.R")
+```
+
+Main outflow regression:
+
+```r
+source("Main- Outflows.R")
+```
+
+High-vs-low fee tables:
+
+```r
+source("Cross Sec Fee- Darendeli-Combined.R")
+source("Cross Sec Fee- Inflows.R")
+source("Cross Sec Fee- Outflows.R")
+```
+
+Tercile and quartile fee analyses can then be run if needed.
+
+---
+
+## 11. Output Formats
+
+Most regression scripts export results in multiple formats:
+
+```text
+.html
+.tex
+.xlsx
+```
+
+The Excel files are useful for checking formatting and sample sizes. The TeX files are intended for thesis writing or LaTeX tables. The HTML files are useful for quick viewing.
+
+Regression tables report:
+
+- coefficient estimates;
+- t-statistics in parentheses;
+- sample size;
+- R-squared measures;
+- fixed effect indicators;
+- cluster level;
+- dependent variable description.
+
+---
+
+## 12. Packages Used
+
+The project uses the following main R packages:
+
+```r
+data.table
+dplyr
+lubridate
+DBI
+RPostgres
+fixest
+modelsummary
+openxlsx
+kableExtra
+ggplot2
+scales
+```
+
+WRDS access is required for the data extraction scripts.
+
+The separate downloader and ML classifier are run outside the main R pipeline, preferably in Google Colab.
+
+---
+
+## 13. Data Availability Note
+
+The repository contains code, not the proprietary WRDS/CRSP data.
+
+The following data files are generated locally and should generally not be committed to the public repository:
+
+```text
+R Raw Data/*.csv
+Distrbution Dates/*.csv
+Downloaded EDGAR filings
+Rendered PDF filings
+Large Excel result workbooks
+```
+
+This keeps the repository focused on reproducible code while avoiding redistribution of restricted or very large files.
+
+---
+
+## 14. Current Empirical Focus
+
+The current preferred specification uses:
+
+```text
+Dependent variable: Darendeli flow at t+1
+Performance: alpha_capm_12m at t
+Post indicator: fund-specific first TSR filing month-end
+Fixed effects: crsp_fundno + ym
+Clustered standard errors: crsp_portno
+```
+
+The main interpretation is based on the coefficient:
+
+```text
+Perf (t) × Post
+```
+
+This coefficient captures whether investor flow-performance sensitivity increases after TSR adoption.
+
+Separate tables examine:
+
+- overall net flows;
+- inflows;
+- outflows;
+- retail share classes;
+- institutional share classes;
+- combined classes;
+- high-fee versus low-fee funds;
+- fee terciles;
+- fee quartiles.
+
+---
+
+## 15. Practical Note
+
+This repository is a research workflow, not a packaged software library. The scripts are intentionally written in a step-by-step style so that each stage of the data construction and analysis can be inspected, checked, and revised as the thesis develops.
