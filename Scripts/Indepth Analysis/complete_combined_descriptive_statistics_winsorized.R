@@ -1,47 +1,74 @@
-# ===================== COMBINED DESCRIPTIVE STATISTICS PACK: WINSORIZED SAMPLE =====================
+# ===================== COMPLETE COMBINED DESCRIPTIVE STATISTICS PACK =====================
 # PURPOSE:
-#   Combine the attached descriptive-statistics scripts into one script and one Excel workbook.
-#   The only substantive change is that descriptive statistics are generated from a 1%/99%
-#   winsorized analysis copy of the sample, rather than from the pre-winsorized sample.
+#   Build the full descriptive-statistics package for the TSR mutual-fund analysis.
 #
-# OUTPUT:
-#   One Excel workbook, with one output table per worksheet:
-#     01_Core_Descriptives
-#     02_PrePost_Class
-#     03_PrePost_N_Mean_Median
-#     04_Class_Structure
-#     05_TSR_Timing_Summary
-#     06_TSR_Adoption_Monthly
-#     07_Pre_Retail_vs_Inst
-#     08_Manager_Concentration
-#     09_Top10_Managers
-#     10_Quartile_Cutoffs
-#     11_Fee_Quartile_Composition
+#   This script is a high-accuracy combined version of the descriptive scripts you
+#   attached. It keeps the same analysis logic from the existing combined winsorized
+#   script, but adds the two output groups that were missing from that combined file:
+#
+#     1) the monthly TSR adoption timing figure; and
+#     2) the 24-month event-window coverage diagnostics, heatmap, and bar chart.
+#
+# WHAT THIS SCRIPT DOES:
+#   - Starts from dt_24 already loaded in memory.
+#   - Creates a local analysis copy only; it does NOT overwrite dt_24.
+#   - Recreates the same helper variables used in the descriptive scripts.
+#   - Computes Darendeli-style return-adjusted flow for descriptive reporting,
+#     unless USE_DARENDELI_FLOW is set to FALSE.
+#   - Winsorizes continuous descriptive variables at the 1st and 99th percentiles.
+#   - Builds one complete Excel workbook with tables and figures.
+#   - Also writes separate CSV/PNG files with clear, unique names for easy use in
+#     the thesis appendix, notes to the professor, or LaTeX/Word tables.
+#
+# OUTPUT FOLDER:
+#   The output folder stays the same as before:
+#       file.path(PROJ_ROOT, "Descriptive Statistics")
+#
+# MAIN WORKBOOK OUTPUT:
+#   descriptive_statistics_winsorized_complete_pack.xlsx
+#
+# WORKBOOK SHEETS:
+#   01_Core_Descriptives
+#   02_PrePost_Class
+#   03_PrePost_N_Mean_Median
+#   04_Class_Structure
+#   05_TSR_Timing_Summary
+#   06_TSR_Adoption_Monthly
+#   07_TSR_Adoption_Figure
+#   08_Pre_Retail_vs_Inst
+#   09_Manager_Concentration
+#   10_Top10_Managers
+#   11_Quartile_Cutoffs
+#   12_Fee_Quartile_Composition
+#   13_Window_Coverage_Counts
+#   14_Window_Heatmap_Table
+#   15_Window_Heatmap_Figure
+#   16_Window_Coverage_Bar
 #
 # ASSUMPTION:
-#   The full script set has already run, so dt_24 exists in memory.
-#
-# IMPORTANT:
-#   This script does not modify dt_24. It creates a local copy, constructs the same helper
-#   variables used in the descriptive scripts, winsorizes the continuous descriptive variables,
-#   and then builds all descriptive tables from the winsorized copy.
-# ===============================================================================================
+#   The full pipeline has already run, so dt_24 exists in memory.
+# =======================================================================================
 
 suppressPackageStartupMessages({
   library(data.table)
   library(lubridate)
   library(fixest)
   library(openxlsx)
+  library(ggplot2)
+  library(scales)
 })
 
 # ------------------------------------------------------------------------------
 # 0) USER OPTIONS
 # ------------------------------------------------------------------------------
 SAMPLE_OBJECT <- "dt_24"
-OUT_WORKBOOK_NAME <- "descriptive_statistics_winsorized_pack.xlsx"
+OUT_WORKBOOK_NAME <- "descriptive_statistics_winsorized_complete_pack.xlsx"
 USE_DARENDELI_FLOW <- TRUE
 FLOW_VAR_NAME <- "flow_desc"
 DIGITS <- 3
+
+# Prefix used for all separate CSV/PNG outputs so the new files do not overwrite older runs.
+OUTPUT_PREFIX <- "complete_winsorized"
 
 # Within-FE SD: aligned with the main class-FE regressions
 FE_ID_VAR   <- "crsp_fundno"
@@ -196,6 +223,36 @@ write_table_sheet <- function(wb, sheet_name, title_text, dt_to_write, start_row
 
   setColWidths(wb, sheet_name, cols = 1:ncol(dt_to_write), widths = "auto")
   freezePane(wb, sheet_name, firstActiveRow = start_row + 1)
+}
+
+# This small helper writes a figure into its own Excel sheet. Keeping figures in
+# separate sheets makes it easier to inspect and export them later.
+write_image_sheet <- function(wb, sheet_name, title_text, image_path,
+                              width = 9, height = 5) {
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, title_text, startRow = 1, startCol = 1)
+
+  title_style <- createStyle(textDecoration = "bold", fontSize = 12, wrapText = TRUE)
+  addStyle(wb, sheet_name, title_style, rows = 1, cols = 1, gridExpand = TRUE)
+  setColWidths(wb, sheet_name, cols = 1, widths = 80)
+
+  if (!is.na(image_path) && file.exists(image_path)) {
+    insertImage(wb, sheet_name, image_path,
+                startRow = 4, startCol = 1,
+                width = width, height = height, units = "in")
+  } else {
+    writeData(wb, sheet_name,
+              "Figure was not created. Check whether the source data were available.",
+              startRow = 4, startCol = 1)
+  }
+}
+
+# Standalone CSV exports are useful because Word/Excel/LaTeX workflows often need
+# individual table files rather than one large workbook.
+save_table_csv <- function(dt_to_save, filename) {
+  out_file <- file.path(OUT_DIR, filename)
+  fwrite(dt_to_save, out_file)
+  out_file
 }
 
 # ------------------------------------------------------------------------------
@@ -974,7 +1031,225 @@ for (cc in setdiff(names(fee_quartile_composition), c("Expense ratio quartile", 
 }
 
 # ------------------------------------------------------------------------------
-# 8) WRITE ONE EXCEL WORKBOOK: ONE TABLE PER SHEET
+# 8) FIGURES AND WINDOW-COVERAGE DIAGNOSTICS
+# ------------------------------------------------------------------------------
+# The original combined file already kept the monthly TSR adoption table, but it
+# did not recreate the visual timing figure. This figure compares the first TSR
+# filing month and the first TSR report month at the portfolio level.
+tsr_figure_path <- file.path(
+  OUT_DIR,
+  paste0("figure_07_tsr_adoption_timing_", OUTPUT_PREFIX, ".png")
+)
+
+fig_dt <- copy(tsr_adoption_monthly)
+fig_dt[, Month := as.Date(Month)]
+
+fig_long <- rbindlist(list(
+  fig_dt[, .(Month, Count = First_TSR_Filings, Series = "First TSR filings")],
+  fig_dt[, .(Month, Count = First_TSR_Reports, Series = "First TSR reports")]
+), fill = TRUE)
+
+p_tsr_adoption <- ggplot(fig_long, aes(x = Month, y = Count, color = Series)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  labs(
+    title = "Monthly first TSR filings and reports",
+    x = NULL,
+    y = "Number of portfolios",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+
+ggsave(filename = tsr_figure_path, plot = p_tsr_adoption, width = 9, height = 5, dpi = 300)
+
+# The event-window diagnostics come from the separate 24-window heatmap script.
+# They are class-level diagnostics: one row per crsp_fundno. The purpose is to
+# show whether each share class has the full 24 months before and 24 months after
+# the portfolio-specific TSR filing month-end.
+window_dt <- copy(DT)
+window_dt[, caldt := as.Date(caldt)]
+window_dt[, tsr_filingdate_first_mend := as.Date(tsr_filingdate_first_mend)]
+window_dt <- window_dt[
+  !is.na(crsp_fundno) &
+    !is.na(caldt) &
+    !is.na(tsr_filingdate_first_mend)
+]
+
+class_window_summary <- window_dt[, .(
+  first_month = min(caldt, na.rm = TRUE),
+  last_month  = max(caldt, na.rm = TRUE),
+  n_rows      = .N,
+  n_months    = uniqueN(caldt),
+  pre_months  = uniqueN(caldt[caldt <  tsr_filingdate_first_mend]),
+  post_months = uniqueN(caldt[caldt >= tsr_filingdate_first_mend]),
+  crsp_portno = if (uniqueN(crsp_portno, na.rm = TRUE) == 1) {
+    unique(na.omit(crsp_portno))[1]
+  } else {
+    NA_real_
+  }
+), by = crsp_fundno]
+
+# dt_24 should already be no wider than 24 months on either side. The cap below is
+# kept as a safety check so the heatmap always has a clean 0-to-24 interpretation.
+class_window_summary[, pre_months  := pmin(pre_months, 24L)]
+class_window_summary[, post_months := pmin(post_months, 24L)]
+
+class_window_summary[, coverage_group := fifelse(
+  pre_months == 24 & post_months == 24, "Full 24 pre + 24 post",
+  fifelse(
+    pre_months == 24 & post_months < 24, "Full pre, incomplete post",
+    fifelse(
+      pre_months < 24 & post_months == 24, "Incomplete pre, full post",
+      "Incomplete pre and post"
+    )
+  )
+)]
+
+class_window_summary[, coverage_group := factor(
+  coverage_group,
+  levels = c(
+    "Full 24 pre + 24 post",
+    "Full pre, incomplete post",
+    "Incomplete pre, full post",
+    "Incomplete pre and post"
+  )
+)]
+
+coverage_counts_table <- class_window_summary[, .(
+  n_classes = .N,
+  pct_classes = 100 * .N / nrow(class_window_summary)
+), by = coverage_group][order(coverage_group)]
+
+coverage_counts_table_export <- copy(coverage_counts_table)
+coverage_counts_table_export[, coverage_group := as.character(coverage_group)]
+coverage_counts_table_export[, n_classes := fmt_int(n_classes)]
+coverage_counts_table_export[, pct_classes := fmt_num(pct_classes)]
+
+heat_dt <- class_window_summary[, .N, by = .(pre_months, post_months)]
+full_grid <- CJ(pre_months = 0:24, post_months = 0:24)
+heat_dt <- heat_dt[full_grid, on = .(pre_months, post_months)]
+heat_dt[is.na(N), N := 0L]
+
+pre_post_table <- dcast(
+  heat_dt,
+  post_months ~ pre_months,
+  value.var = "N",
+  fill = 0
+)
+
+class_window_heatmap_path <- file.path(
+  OUT_DIR,
+  paste0("figure_15_class_window_heatmap_dt24_", OUTPUT_PREFIX, ".png")
+)
+class_window_bar_path <- file.path(
+  OUT_DIR,
+  paste0("figure_16_class_window_coverage_bar_dt24_", OUTPUT_PREFIX, ".png")
+)
+
+p_heat <- ggplot(heat_dt, aes(x = pre_months, y = post_months, fill = N)) +
+  geom_tile(color = "white", linewidth = 0.25) +
+  geom_text(aes(label = ifelse(N > 0, N, "")), size = 3) +
+  scale_x_continuous(breaks = seq(0, 24, by = 2)) +
+  scale_y_continuous(breaks = seq(0, 24, by = 2)) +
+  scale_fill_gradient(low = "grey95", high = "navy", labels = comma) +
+  labs(
+    title = "Class-level TSR event-window coverage",
+    subtitle = "Each tile shows the number of share classes with a given number of pre- and post-TSR months",
+    x = "Months available before TSR month-end",
+    y = "Months available after TSR month-end",
+    fill = "No. of classes"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave(filename = class_window_heatmap_path, plot = p_heat, width = 10, height = 8, dpi = 300)
+
+p_bar <- ggplot(coverage_counts_table, aes(x = coverage_group, y = n_classes)) +
+  geom_col() +
+  geom_text(aes(label = paste0(n_classes, "\n(", round(pct_classes, 1), "%)")),
+            vjust = -0.2, size = 4) +
+  labs(
+    title = "Coverage of TSR event windows across share classes",
+    x = NULL,
+    y = "Number of classes"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1)
+  )
+
+ggsave(filename = class_window_bar_path, plot = p_bar, width = 10, height = 6, dpi = 300)
+
+# Standalone table exports. The names intentionally match the workbook sheet
+# numbers and table contents so you can quickly identify each output file.
+standalone_outputs <- list(
+  table_01_core_descriptives = save_table_csv(
+    desc_table_core_export,
+    paste0("table_01_core_descriptives_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_02_prepost_class = save_table_csv(
+    one_informative_descriptive_table_export,
+    paste0("table_02_prepost_by_class_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_03_prepost_n_mean_median = save_table_csv(
+    desc_table_pre_post_with_diffs_export,
+    paste0("table_03_prepost_n_mean_median_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_04_class_structure = save_table_csv(
+    class_structure_table,
+    paste0("table_04_class_structure_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_05_tsr_timing_summary = save_table_csv(
+    tsr_timing_summary,
+    paste0("table_05_tsr_timing_summary_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_06_tsr_adoption_monthly = save_table_csv(
+    tsr_adoption_monthly,
+    paste0("table_06_tsr_adoption_monthly_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_08_pre_retail_vs_inst = save_table_csv(
+    pre_retail_vs_inst,
+    paste0("table_08_pre_retail_vs_inst_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_09_manager_concentration = save_table_csv(
+    manager_concentration_summary,
+    paste0("table_09_manager_concentration_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_10_top10_managers = save_table_csv(
+    top10_managers,
+    paste0("table_10_top10_managers_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_11_quartile_cutoffs = save_table_csv(
+    quartile_cutoffs,
+    paste0("table_11_quartile_cutoffs_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_12_fee_quartile_composition = save_table_csv(
+    fee_quartile_composition,
+    paste0("table_12_fee_quartile_composition_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_13_window_coverage_counts = save_table_csv(
+    coverage_counts_table_export,
+    paste0("table_13_window_coverage_counts_dt24_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_14_window_heatmap_table = save_table_csv(
+    pre_post_table,
+    paste0("table_14_window_heatmap_matrix_dt24_", OUTPUT_PREFIX, ".csv")
+  ),
+  table_13a_class_window_summary_raw = save_table_csv(
+    class_window_summary,
+    paste0("table_13a_class_window_summary_dt24_", OUTPUT_PREFIX, ".csv")
+  )
+)
+
+# ------------------------------------------------------------------------------
+# 9) WRITE ONE EXCEL WORKBOOK: ONE TABLE OR FIGURE PER SHEET
 # ------------------------------------------------------------------------------
 wb <- createWorkbook()
 
@@ -1044,8 +1319,16 @@ write_table_sheet(
   tsr_adoption_monthly
 )
 
+write_image_sheet(
+  wb, "07_TSR_Adoption_Figure",
+  "Figure. Monthly first TSR filings and first TSR reports at the portfolio level.",
+  tsr_figure_path,
+  width = 9,
+  height = 5
+)
+
 write_table_sheet(
-  wb, "07_Pre_Retail_vs_Inst",
+  wb, "08_Pre_Retail_vs_Inst",
   paste0(
     "Pre-period retail versus institutional comparison. The pre period is defined relative to each portfolio's first TSR filing month-end. ",
     "The CAPM and Carhart rows use the ", ALPHA_WINDOW_COMPARE, "-month alpha windows. ",
@@ -1055,37 +1338,75 @@ write_table_sheet(
 )
 
 write_table_sheet(
-  wb, "08_Manager_Concentration",
+  wb, "09_Manager_Concentration",
   "Management-company concentration summary based on the final sample. Snapshot TNA uses the latest class-level observation in dt_24.",
   manager_concentration_summary
 )
 
 write_table_sheet(
-  wb, "09_Top10_Managers",
+  wb, "10_Top10_Managers",
   "Top 10 management companies ranked by share-class-month observations in the final sample.",
   top10_managers
 )
 
 write_table_sheet(
-  wb, "10_Quartile_Cutoffs",
+  wb, "11_Quartile_Cutoffs",
   "Distribution cutoffs for expense ratio, size, and turnover using the latest class-level snapshot in dt_24 after winsorizing continuous descriptive variables.",
   quartile_cutoffs
 )
 
 write_table_sheet(
-  wb, "11_Fee_Quartile_Composition",
+  wb, "12_Fee_Quartile_Composition",
   "Composition of the sample across expense-ratio quartiles using the latest class-level snapshot in dt_24 after winsorizing continuous descriptive variables.",
   fee_quartile_composition
+)
+
+write_table_sheet(
+  wb, "13_Window_Coverage_Counts",
+  "Class-level TSR event-window coverage counts. This reports how many share classes have full 24-month pre/post windows or incomplete windows on either side of TSR adoption.",
+  coverage_counts_table_export
+)
+
+write_table_sheet(
+  wb, "14_Window_Heatmap_Table",
+  "Class-level event-window heatmap matrix. Rows are post-TSR months available and columns are pre-TSR months available; each cell is the number of share classes.",
+  pre_post_table
+)
+
+write_image_sheet(
+  wb, "15_Window_Heatmap_Figure",
+  "Figure. Class-level TSR event-window heatmap for dt_24.",
+  class_window_heatmap_path,
+  width = 10,
+  height = 8
+)
+
+write_image_sheet(
+  wb, "16_Window_Coverage_Bar",
+  "Figure. Coverage of TSR event windows across share classes.",
+  class_window_bar_path,
+  width = 10,
+  height = 6
 )
 
 xlsx_file <- file.path(OUT_DIR, OUT_WORKBOOK_NAME)
 saveWorkbook(wb, xlsx_file, overwrite = TRUE)
 
 # ------------------------------------------------------------------------------
-# 9) CONSOLE PREVIEW AND GLOBAL OUTPUT OBJECTS
+# 10) CONSOLE PREVIEW AND GLOBAL OUTPUT OBJECTS
 # ------------------------------------------------------------------------------
 cat("\nSaved workbook:\n")
 cat("  ", xlsx_file, "\n", sep = "")
+
+cat("\nSaved standalone CSV files:")
+for (nm in names(standalone_outputs)) {
+  cat("\n  ", nm, ": ", standalone_outputs[[nm]], sep = "")
+}
+cat("\n\nSaved standalone figure files:")
+cat("\n  TSR adoption figure: ", tsr_figure_path, sep = "")
+cat("\n  Window heatmap: ", class_window_heatmap_path, sep = "")
+cat("\n  Window coverage bar: ", class_window_bar_path, "\n", sep = "")
+
 cat("\nWinsorization applied to continuous descriptive variables using probs = c(",
     paste(WINSOR_PROBS, collapse = ", "), ").\n", sep = "")
 
@@ -1113,6 +1434,12 @@ print(manager_concentration_summary)
 cat("\n=== FEE QUARTILE COMPOSITION ===\n")
 print(fee_quartile_composition)
 
+cat("\n=== WINDOW COVERAGE COUNTS ===\n")
+print(coverage_counts_table_export)
+
+cat("\n=== WINDOW HEATMAP MATRIX ===\n")
+print(pre_post_table)
+
 assign("desc_table_core", desc_table_core, envir = .GlobalEnv)
 assign("desc_table_core_export", desc_table_core_export, envir = .GlobalEnv)
 assign("one_informative_descriptive_table_raw", one_informative_descriptive_table_raw, envir = .GlobalEnv)
@@ -1127,3 +1454,15 @@ assign("manager_concentration_summary", manager_concentration_summary, envir = .
 assign("top10_managers", top10_managers, envir = .GlobalEnv)
 assign("quartile_cutoffs", quartile_cutoffs, envir = .GlobalEnv)
 assign("fee_quartile_composition", fee_quartile_composition, envir = .GlobalEnv)
+assign("p_tsr_adoption", p_tsr_adoption, envir = .GlobalEnv)
+assign("tsr_figure_path", tsr_figure_path, envir = .GlobalEnv)
+assign("class_window_summary", class_window_summary, envir = .GlobalEnv)
+assign("coverage_counts_table", coverage_counts_table, envir = .GlobalEnv)
+assign("coverage_counts_table_export", coverage_counts_table_export, envir = .GlobalEnv)
+assign("class_window_heat_dt", heat_dt, envir = .GlobalEnv)
+assign("class_window_heatmap_table", pre_post_table, envir = .GlobalEnv)
+assign("p_class_window_heatmap", p_heat, envir = .GlobalEnv)
+assign("p_class_window_bar", p_bar, envir = .GlobalEnv)
+assign("class_window_heatmap_path", class_window_heatmap_path, envir = .GlobalEnv)
+assign("class_window_bar_path", class_window_bar_path, envir = .GlobalEnv)
+assign("standalone_outputs", standalone_outputs, envir = .GlobalEnv)
