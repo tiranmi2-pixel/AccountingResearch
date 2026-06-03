@@ -84,7 +84,7 @@ This means each portfolio has its own TSR adoption month.
 ---
 ## 3. Repository Structure
 
-The main project folder is now more streamlined. The core R pipeline scripts are stored directly inside the `Scripts/` folder. The deeper regression and descriptive-statistics scripts are stored in `Scripts/Indepth Analysis/`, while the EDGAR downloader and ML-related scripts are stored in `Scripts/Downloader & ML/`.
+The core R pipeline scripts are stored directly inside the `Scripts/` folder. The deeper regression and descriptive-statistics scripts are stored in `Scripts/Indepth Analysis/`, while the EDGAR downloader and ML-related scripts are stored in `Scripts/Downloader & ML/`.
 
 ```text
 AccountingResearch/
@@ -192,7 +192,7 @@ Main diagnostic output:
 R Raw Data/filter_drop_summary_2022_2025_with_lipper_match.csv
 ```
 
-This diagnostic file is used to understand how many funds are lost at each filtering step. It is an information and validation output, not a regression output.
+This diagnostic file is used to understand how many funds are lost at each filtering step. It is an information and validation output.
 
 After filtering, the script auto-runs:
 
@@ -307,7 +307,7 @@ The script then auto-runs:
 
 This script connects the R pipeline to the separate EDGAR downloader and ML workflow.
 
-First, it creates a portfolio-level file for EDGAR searching and downloading:
+First, it creates a portfolio level file for EDGAR searching and downloading:
 
 ```text
 R Raw Data/TSR Manual Search List - Equity.csv
@@ -400,7 +400,7 @@ The main analysis sample is saved as:
 R Raw Data/Equity_filtered_24m_pre_post_by_tsr_filingdate_first.csv
 ```
 
-The script also keeps the event-window sample in memory as:
+The script also keeps the event window sample in memory as:
 
 ```text
 dt_24
@@ -495,7 +495,7 @@ The preferred performance measure in the current professor tables is:
 alpha_capm_12m
 ```
 
-The current regression scripts generally use:
+The current regression scripts use:
 
 ```text
 Performance variable = alpha_capm_12m at t
@@ -591,7 +591,7 @@ Results/professor_alpha_capm_12m_dar_tplus1_classFE/
 Main- Inflows.R
 ```
 
-This script estimates the same main structure, but the dependent variable is positive new money only:
+This script estimates the same main formula, but the dependent variable is positive new money only:
 
 ```text
 inflow at t+1
@@ -613,7 +613,7 @@ Results/professor_alpha_capm_12m_inflow_tplus1_classFE/
 Main- Outflows.R
 ```
 
-This script estimates the same main structure, but the dependent variable is withdrawals only:
+This script estimates the same main formula, but the dependent variable is withdrawals only:
 
 ```text
 outflow at t+1
@@ -633,7 +633,7 @@ Results/professor_alpha_capm_12m_outflow_tplus1_classFE/
 
 The project also tests whether TSR effects differ between high-fee and low-fee funds.
 
-The fee grouping is based on average pre-TSR expense ratio. In the high-vs-low scripts, each share class receives a permanent fee group based on its pre-TSR average expense ratio.
+The fee grouping is based on average pre-TSR expense ratio. In the high-vs-low scripts, each share class receives a permanent fee group based on its pre TSR average expense ratio.
 
 ---
 
@@ -766,19 +766,7 @@ mgmt_fee_l1
 exp_ratio_l1
 ```
 
-Some regression scripts create contemporaneous local controls inside the script, such as:
 
-```text
-age_years_t
-log_tna_t
-flow_dar_t
-log_familytna_t
-turn_ratio_t
-mgmt_fee_t
-exp_ratio_t
-```
-
-These local variables are used only inside those scripts and do not overwrite the saved pipeline data.
 
 ---
 
@@ -906,17 +894,7 @@ Most regression scripts export results in multiple formats:
 .xlsx
 ```
 
-The Excel files are useful for checking formatting and sample sizes. The TeX files are intended for thesis writing or LaTeX tables. The HTML files are useful for quick viewing.
 
-Regression tables report:
-
-- coefficient estimates;
-- t-statistics in parentheses;
-- sample size;
-- R-squared measures;
-- fixed effect indicators;
-- cluster level;
-- dependent variable description.
 
 ---
 
@@ -940,7 +918,7 @@ scales
 
 WRDS access is required for the data extraction scripts.
 
-The separate downloader and ML classifier are run outside the main R pipeline, preferably in Ubuntu VPS.
+The separate downloader and ML classifier are run outside the main R pipeline, in Ubuntu VPS.
 
 ---
 
@@ -982,17 +960,6 @@ Perf (t) × Post
 
 This coefficient captures whether investor flow-performance sensitivity increases after TSR adoption.
 
-Separate tables examine:
-
-- overall net flows;
-- inflows;
-- outflows;
-- retail share classes;
-- institutional share classes;
-- combined classes;
-- high-fee versus low-fee funds;
-- fee terciles;
-- fee quartiles.
 
 ---
 
