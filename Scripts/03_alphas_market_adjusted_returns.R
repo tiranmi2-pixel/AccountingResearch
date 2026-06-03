@@ -9,6 +9,17 @@
 # =====================================================================
 # ==== Libraries + pre-flight checks ====
 # =====================================================================
+stopifnot(exists("dt"))
+setDT(dt)
+dt[, caldt := as.Date(caldt)]
+setorder(dt, crsp_fundno, caldt)
+
+cat("\n[03] Using dt from GlobalEnv.\n")
+cat("[03] Date range:", as.character(min(dt$caldt, na.rm=TRUE)), "to", as.character(max(dt$caldt, na.rm=TRUE)), "\n")
+cat("[03] Unique fundnos:", uniqueN(dt$crsp_fundno), " Rows:", nrow(dt), "\n")
+
+
+
 library(data.table)
 
 # Script 01 should have created dt + factor objects in memory already
@@ -62,15 +73,13 @@ if (!("exret" %in% names(dt))) dt[, exret := as.numeric(mret) - as.numeric(rf)]
 # ==== B) Monthly flow (kept here so other scripts/controls can reuse) ====
 # =====================================================================
 # We compute lagged TNA and fund flow once and keep it on dt.
-# Flow formula is the standard CRSP-style: isolate net flows from TNA growth.
+# Darendeli-style return-adjusted net flow formula.
 if (!("mtna_l1" %in% names(dt))) dt[, mtna_l1 := shift(mtna, 1L), by = crsp_fundno]
 
 if (!("flow" %in% names(dt))) {
-  dt[, flow := (mtna - mtna_l1 * (1 + mret)) / mtna_l1]
-  # If lagged TNA is missing or non-positive, flow is undefined — set it to NA
-  dt[is.na(mtna_l1) | mtna_l1 <= 0, flow := NA_real_]
+  dt[, flow := (mtna - mtna_l1 * (1 + mret)) / (mtna_l1 * (1 + mret))]
+  dt[is.na(mtna_l1) | mtna_l1 <= 0 | is.na(mret) | (1 + mret) <= 0, flow := NA_real_]
 }
-
 # Lagged flow is handy for regressions (and gets used later in controls)
 if (!("flow_l1" %in% names(dt))) dt[, flow_l1 := shift(flow, 1L), by = crsp_fundno]
 
@@ -211,7 +220,74 @@ assign("dt", dt, envir = .GlobalEnv)
 cat("\n[03] Alphas + trailing returns added.\n")
 cat("[03] Rows:", nrow(dt), " Cols:", ncol(dt), "\n")
 cat("[03] Non-missing alpha_carhart_36m:", sum(!is.na(dt$alpha_carhart_36m)), "\n")
+# =====================================================================
+# ==== NEW: Append Script 03 descriptives to Script 02 Excel workbook ====
+# =====================================================================
 
+DT_DESC <- copy(dt)[caldt >= as.Date("2022-01-01") & caldt <= as.Date("2025-12-31")]
+setDT(DT_DESC)
+
+# Availability table (% non-missing). (values are 0-100)
+avail <- DT_DESC[, .(
+  n_rows = .N,
+  pct_alpha_capm_12  = mean(!is.na(alpha_capm_12m)) * 100,
+  pct_alpha_capm_24  = mean(!is.na(alpha_capm_24m)) * 100,
+  pct_alpha_capm_36  = mean(!is.na(alpha_capm_36m)) * 100,
+  pct_alpha_car_12   = mean(!is.na(alpha_carhart_12m)) * 100,
+  pct_alpha_car_24   = mean(!is.na(alpha_carhart_24m)) * 100,
+  pct_alpha_car_36   = mean(!is.na(alpha_carhart_36m)) * 100,
+  pct_fund_12        = mean(!is.na(fund_ret_12m)) * 100,
+  pct_fund_60        = mean(!is.na(fund_ret_60m)) * 100,
+  pct_fund_120       = mean(!is.na(fund_ret_120m)) * 100,
+  pct_excess_12      = mean(!is.na(excess_ret_12m)) * 100,
+  pct_excess_60      = mean(!is.na(excess_ret_60m)) * 100,
+  pct_excess_120     = mean(!is.na(excess_ret_120m)) * 100
+)]
+
+# Quick percentiles (sanity check: scale/outliers)
+perf_p <- DT_DESC[, .(
+  mret_p1  = as.numeric(quantile(mret, 0.01, na.rm=TRUE)),
+  mret_p50 = as.numeric(quantile(mret, 0.50, na.rm=TRUE)),
+  mret_p99 = as.numeric(quantile(mret, 0.99, na.rm=TRUE)),
+  flow_p1  = as.numeric(quantile(flow, 0.01, na.rm=TRUE)),
+  flow_p50 = as.numeric(quantile(flow, 0.50, na.rm=TRUE)),
+  flow_p99 = as.numeric(quantile(flow, 0.99, na.rm=TRUE))
+)]
+
+# Write into the SAME Excel workbook as Script 02
+desc_dir  <- file.path(proj_root, "Descriptive Statistics")
+xlsx_path <- file.path(desc_dir, "Descriptive Statistics - Equity Sample (2022-2025).xlsx")
+dir.create(desc_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  stop("Package 'openxlsx' is required. Install via install.packages('openxlsx').")
+}
+library(openxlsx)
+
+if (file.exists(xlsx_path)) {
+  wb <- loadWorkbook(xlsx_path)
+} else {
+  wb <- createWorkbook()
+}
+
+# Helper: safe add/replace sheet
+add_or_replace_sheet <- function(wb, sheet_name, data) {
+  # Excel sheet name constraints
+  nm <- gsub("[:\\\\/?*\\[\\]]", "_", sheet_name)
+  nm <- substr(nm, 1, 31)
+  if (nm %in% names(wb)) removeWorksheet(wb, nm)
+  addWorksheet(wb, nm)
+  writeData(wb, nm, data)
+  freezePane(wb, nm, firstRow = TRUE)
+  addFilter(wb, nm, row = 1, cols = 1:ncol(data))
+  setColWidths(wb, nm, cols = 1:ncol(data), widths = "auto")
+}
+
+add_or_replace_sheet(wb, "03 Avail - Alphas/Returns", avail)
+add_or_replace_sheet(wb, "03 Sanity - mret/flow pct", perf_p)
+
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+cat("[03] Appended Script 03 descriptives to Excel:\n", xlsx_path, "\n")
 # =====================================================================
 # ==== Auto-run Script 04 ====
 # =====================================================================

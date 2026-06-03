@@ -18,6 +18,17 @@ stopifnot(exists("wrds"), exists("dt"), exists("proj_root"))
 # Make sure we're working with a data.table (in-place updates below rely on that)
 setDT(dt)
 
+# ============================================================
+# TIME WINDOW FOR REPORTING / DROP SUMMARY / OUTPUT SLICE ONLY
+# (does NOT change the full-history dt used for rolling measures)
+# ============================================================
+WIN_START <- as.Date("2022-01-01")
+WIN_END   <- as.Date("2025-12-31")
+
+dt[, caldt := as.Date(caldt)]
+
+
+
 # We'll use this to preserve the original column order and only append new ones to the right
 old_cols <- names(dt)  # preserve existing order
 
@@ -176,14 +187,25 @@ dt[, crsp_obj_cd     := toupper(trimws(crsp_obj_cd))]
 dt[, lipper_asset_cd := toupper(trimws(lipper_asset_cd))]
 
 # ---------------------------------------------------------------------
-# ==== 5.0 INFO-ONLY: Export filter drop summary for 2021-2025 window ====
+# ==== 5.0 INFO-ONLY: Export filter drop summary for 2022-2025 window ====
 # ---------------------------------------------------------------------
-# Important: this uses a TEMP copy (dt_tmp) and does NOT change dt.
-# We track counts as we apply each filter step, plus a quick Lipper-vs-CRSP-ED sanity check.
-analysis_start <- as.Date("2021-01-01")
-analysis_end   <- as.Date("2025-12-31")
 
-dt_tmp <- copy(dt)[caldt >= analysis_start & caldt <= analysis_end]
+
+dt_tmp <- copy(dt)[caldt >= WIN_START & caldt <= WIN_END]
+
+# --- NEW: Missingness / coverage diagnostics (START universe, before any drops) ---
+dt_tmp_start <- copy(dt_tmp)
+
+miss_tbl_start <- dt_tmp_start[, .(
+  n_rows = .N,
+  pct_missing_obj    = mean(is.na(crsp_obj_cd) | crsp_obj_cd=="")*100,
+  pct_missing_lipper = mean(is.na(lipper_asset_cd) | lipper_asset_cd=="")*100,
+  pct_missing_policy = mean(is.na(policy) | policy=="")*100,
+  pct_missing_etflag = mean(is.na(et_flag) | et_flag=="")*100,
+  pct_missing_index  = mean(is.na(index_fund_flag) | index_fund_flag=="")*100
+)]
+
+tab_obj_lipper_start <- dt_tmp_start[, .N, by=.(crsp_obj_cd, lipper_asset_cd)][order(-N)]
 
 # Helper: core counts at a step (unique funds, portfolios, rows)
 count_step <- function(DT) {
@@ -223,10 +245,10 @@ steps <- data.table(
   ed_lipper_present_funds = as.integer(NA)
 )
 
-# Step A: starting universe in 2021-2025
+# Step A: starting universe in 2022-2025
 c0 <- count_step(dt_tmp)
 steps <- rbind(steps, data.table(
-  step="Start (all funds in dt, 2021-2025)",
+  step="Start (all funds in dt, 2022-2025)",
   n_funds=c0$n_funds, n_portno=c0$n_portno, n_rows=c0$n_rows,
   ed_lipper_eq_funds=NA_integer_, ed_lipper_non_eq_funds=NA_integer_,
   ed_lipper_missing_funds=NA_integer_, ed_lipper_present_funds=NA_integer_
@@ -310,84 +332,58 @@ steps[, `:=`(
 out_dir <- file.path(proj_root, "R Raw Data")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-summary_file <- file.path(out_dir, "filter_drop_summary_2021_2025_with_lipper_match.csv")
+summary_file <- file.path(out_dir, "filter_drop_summary_2022_2025_with_lipper_match.csv")
 fwrite(steps, summary_file)
 
 cat("[02] Saved filter drop summary to:", summary_file, "\n")
 
 
-# =====================================================================
-# ==== SNAPSHOT: save UNFILTERED universe with "final columns" ====
-# =====================================================================
-# Place this RIGHT BEFORE you start filtering dt (before 5.1).
-# This will:
-#   1) Copy the full, unfiltered dt (after style join)
-#   2) Run 02b + 03 + 04 on the COPY (so it gets TSR + alphas + controls)
-#   3) Save a single CSV with ALL columns, but NO equity/ETF/index filters applied
 
-library(data.table)
-stopifnot(exists("dt"), exists("proj_root"))
 
-# 0) Make an unfiltered snapshot now (this is the key moment)
-dt_unfilt <- copy(dt)
-
-# 1) Temporarily swap global dt to the snapshot and run the enrichment pipeline on it
-dt_saved_for_filters <- copy(dt)              # keep the working dt safe
-assign("dt", dt_unfilt, envir = .GlobalEnv)   # downstream scripts read/write global dt
-
-# Run the “final-column” builders on the unfiltered snapshot
-source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
-source(file.path(proj_root, "Scripts", "03_alphas_market_adjusted_returns.R"))
-source(file.path(proj_root, "Scripts", "04_controls_and_save.R"))
-
-# Pull the enriched unfiltered dt back out
-dt_unfilt_final <- copy(get("dt", envir = .GlobalEnv))
-
-# 2) Restore the original dt so your equity filtering continues exactly as before
-assign("dt", dt_saved_for_filters, envir = .GlobalEnv)
-rm(dt_saved_for_filters)
-
-# 3) Write the unfiltered “ALL FINAL COLS” CSV
-out_dir <- file.path(proj_root, "R Raw Data")
-dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-
-unfilt_csv <- file.path(out_dir, "mf_unfiltered_all_final_columns.csv")
-fwrite(dt_unfilt_final, unfilt_csv)
-
-cat("[02] Saved UNFILTERED all-final-columns CSV to:", unfilt_csv, "\n")
-cat("[02] Unfiltered rows:", nrow(dt_unfilt_final), " cols:", ncol(dt_unfilt_final), "\n")
 
 
 # ---------------------------------------------------------------------
 # ==== 5.1–5.4 Apply the same filters to the REAL dt (this changes dt) ====
 # ---------------------------------------------------------------------
 
+dt_equity_full <- copy(dt)   # keep original dt (universe) untouched
+
 # 5.1 Exclude ETFs/ETNs (CRSP: F=ETF, N=ETN). Keep blank/NA.
-dt <- dt[!(et_flag %in% c("F","N"))]
+dt_equity_full <- dt_equity_full[!(et_flag %in% c("F","N"))]
 
 # 5.2 Exclude index funds (CRSP: B/D/E). Keep blank/NA.
-dt <- dt[!(index_fund_flag %in% c("B","D","E"))]
+dt_equity_full <- dt_equity_full[!(index_fund_flag %in% c("B","D","E"))]
 
 # 5.3 Keep Domestic Equity by CRSP objective code (ED**)
-dt <- dt[!is.na(crsp_obj_cd) & substr(crsp_obj_cd, 1, 2) == "ED"]
+dt_equity_full <- dt_equity_full[!is.na(crsp_obj_cd) & substr(crsp_obj_cd, 1, 2) == "ED"]
 
 # 5.4 Lipper validation when available:
 #     Keep EQ; if missing/blank keep (prioritize CRSP); otherwise drop.
-dt <- dt[is.na(lipper_asset_cd) | lipper_asset_cd == "" | lipper_asset_cd == "EQ"]
+dt_equity_full <- dt_equity_full[is.na(lipper_asset_cd) | lipper_asset_cd == "" | lipper_asset_cd == "EQ"]
 
-# =====================================================================
-# ==== Finalize + hand off to downstream scripts ====
-# =====================================================================
+# Windowed slice for reporting/descriptives only (2022–2025)
+dt_equity_win <- dt_equity_full[caldt >= WIN_START & caldt <= WIN_END]
 
-# Keep dt sorted (helps rolling calcs later and makes debugging easier)
-setorder(dt, crsp_fundno, caldt)
+# Keep equity FULL history sorted for rolling computations downstream
+setorder(dt_equity_full, crsp_fundno, caldt)
 
-# Update the global dt so the next scripts pick up the filtered panel
-assign("dt", dt, envir = .GlobalEnv)
+# Hand off FULL-history equity to downstream scripts
+assign("dt", dt_equity_full, envir = .GlobalEnv)
+assign("dt_equity_win", dt_equity_win, envir = .GlobalEnv)  # optional for later reporting
 
-cat("\n[02] Equity filter applied.\n")
-cat("[02] Rows:", nrow(dt), " Cols:", ncol(dt), "\n")
+cat("\n[02] Equity filter applied (dt unchanged; equity stored in dt).\n")
+cat("[02] Equity rows (full history):", nrow(dt_equity_full), " Cols:", ncol(dt_equity_full), "\n")
+cat("[02] Equity rows (2022-2025):", nrow(dt_equity_win), "\n")
 
-# Auto-run Script 03 (and TSR distribution attach script)
-source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
+
+cat("[02] Rows:", nrow(dt_equity_full), " Cols:", ncol(dt_equity_full), "\n")
+
+
+
+
+if (exists("RUN_TSR_DATES", envir = .GlobalEnv) && isTRUE(get("RUN_TSR_DATES", envir = .GlobalEnv))) {
+  source(file.path(proj_root, "Scripts", "02b_tsr_approx_distribution.R"))
+} else {
+  message("[02b] RUN_TSR_DATES=FALSE (or missing) -> skipping TSR distribution date construction.")
+}
 source(file.path(proj_root, "Scripts", "03_alphas_market_adjusted_returns.R"))

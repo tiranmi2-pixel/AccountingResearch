@@ -61,16 +61,26 @@ dbGetQuery <- function(conn, statement, ...) {
   out
 }
 
+RUN_TSR_DATES <- FALSE   # TRUE = run 02b TSR date construction, FALSE = remove it
+assign("RUN_TSR_DATES", RUN_TSR_DATES, envir = .GlobalEnv)
+
 # =====================================================================
 # ==== Connect + project root ====
 # =====================================================================
 wrds <- wrds_reconnect()
 
-# This is where downstream scripts/results live on your machine
-proj_root <- normalizePath(
-  file.path(Sys.getenv("USERPROFILE"), "Desktop", "Research Github", "AccountingResearch"),
-  winslash = "/", mustWork = TRUE
-)
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  # If running from RStudio, use the directory of the active file
+  this_file <- rstudioapi::getActiveDocumentContext()$path
+  stopifnot(nzchar(this_file))
+  proj_root <- normalizePath(file.path(dirname(this_file), ".."), winslash = "/", mustWork = TRUE)
+} else {
+  # Fallback: assume working directory is Scripts/ (or setwd there)
+  proj_root <- normalizePath(file.path(getwd(), ".."), winslash = "/", mustWork = TRUE)
+}
+
+cat("[proj_root] ", proj_root, "\n", sep = "")
+
 
 # =====================================================================
 # ==== Step 1: Pull CRSP monthly return/TNA panel ====
@@ -248,7 +258,7 @@ pad_cik10 <- function(x) {
   x <- sub("\\.0+$", "", x)  # strip "1234.0" if present
   ifelse(
     !is.na(x) & grepl("^[0-9]+$", x),
-    sprintf("%010d", as.integer(x)),
+    sprintf("%010.0f", as.numeric(x)),
     x
   )
 }
@@ -300,6 +310,46 @@ mf_tmp[, cik_best := data.table::fifelse(
 )]
 
 # =====================================================================
+# ==== Step 5C: Add class-level expense ratio (keep NA after coverage) ====
+# =====================================================================
+# Source: crsp_q_mutualfunds.fund_fees (KEY: crsp_fundno; window: begdt/enddt)
+# IMPORTANT: We do NOT carry forward beyond enddt -> stays NA after mid-2025.
+
+fees_df <- dbGetQuery(wrds, sprintf("
+  SELECT crsp_fundno, begdt, enddt, fiscal_yearend, exp_ratio
+  FROM crsp_q_mutualfunds.fund_fees
+  WHERE enddt >= '%s' AND begdt <= '%s'
+", format(min_dt, "%Y-%m-%d"), format(max_dt, "%Y-%m-%d")))
+
+fees_df <- as.data.table(fees_df)
+fees_df[, `:=`(
+  crsp_fundno = as.numeric(crsp_fundno),
+  begdt = as.Date(begdt),
+  enddt = as.Date(enddt),
+  fiscal_yearend = as.Date(fiscal_yearend),
+  exp_ratio = as.numeric(exp_ratio)
+)]
+
+# Guard: convert percent -> decimal if it looks like percent
+if (is.finite(mean(fees_df$exp_ratio, na.rm=TRUE)) && mean(fees_df$exp_ratio, na.rm=TRUE) > 1) {
+  fees_df[, exp_ratio := exp_ratio/100]
+}
+
+# Initialize as NA so months outside any [begdt, enddt] remain NA
+mf_tmp[, exp_ratio := NA_real_]
+
+# Non-equi join: fill only where caldt is within fee validity window
+mf_tmp[fees_df,
+       exp_ratio := i.exp_ratio,
+       on = .(crsp_fundno, caldt >= begdt, caldt <= enddt)]
+
+# Timing-safe lag (will also stay NA once exp_ratio becomes NA)
+mf_tmp[, exp_ratio_l1 := shift(exp_ratio, 1L), by = crsp_fundno]
+
+
+
+
+# =====================================================================
 # ==== Convert back + enforce your preferred column order ====
 # =====================================================================
 mf_with_names <- as.data.frame(mf_tmp)
@@ -312,7 +362,7 @@ mf_with_names <- mf_with_names %>%
     lipper_asset_cd, policy,
     city, state, website,
     crsp_cl_grp, retail_fund, inst_fund,
-    caldt, mret, mnav, mtna,
+    caldt, mret, mnav, mtna,exp_ratio, exp_ratio_l1,
     begdt, enddt,
     cusip8, ncusip, first_offer_dt,
     mgmt_name, mgmt_cd,
@@ -328,6 +378,7 @@ mf_with_names <- mf_with_names %>%
 # =====================================================================
 dt <- as.data.table(mf_with_names)
 dt[, caldt := as.Date(caldt)]
+dt <- dt[!is.na(caldt)]
 setorder(dt, crsp_fundno, caldt)
 
 # Save objects into global env for downstream scripts
@@ -340,7 +391,15 @@ assign("wrds", wrds, envir = .GlobalEnv)
 cat("\n[01] Base dt created in memory.\n")
 cat("[01] Rows:", nrow(dt), " Cols:", ncol(dt), "\n")
 
+
+
+
 # =====================================================================
 # ==== Auto-run Script 02 ====
 # =====================================================================
+RUN_TSR_DATES <- FALSE
+assign("RUN_TSR_DATES", RUN_TSR_DATES, envir = .GlobalEnv)
+
+
 source(file.path(proj_root, "Scripts", "02_equity_filter.R"))
+YES
